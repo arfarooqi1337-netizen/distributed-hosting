@@ -23,9 +23,6 @@ function scoreNodeForDeployment(node, deployType) {
   if (!node || node.status !== 'online') return 0;
   if (node.mode === 'OFFLINE') return 0;
   if (node.type === 'DISABLED') return 0;
-  // Nodes in GAMING or maintenance mode should not receive new deployments
-  if (node.mode === 'GAMING') return 0;
-  if (node.type === 'DISABLED') return 0;
 
   // Check runtime capabilities for deployment type
   const caps = node.capabilities || {};
@@ -89,7 +86,7 @@ async function findBestNode(deployType, excludeNodeIds = []) {
 
   let query = {
     status: 'online',
-    mode: { $in: ['IDLE', 'NORMAL'] },
+    mode: { $in: ['IDLE', 'NORMAL', 'GAMING'] },
     type: { $ne: 'DISABLED' },
   };
 
