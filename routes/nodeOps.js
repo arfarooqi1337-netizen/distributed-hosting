@@ -124,9 +124,11 @@ router.post('/:nodeId/drain', authenticateAdmin, auditMiddleware, async (req, re
           $set: {
             activeNode: altNode._id,
             primaryNode: altNode._id,
-            [`failoverHistory.${Date.now()}`]: {
-              from: node.name,
-              to: altNode.name,
+          },
+          $push: {
+            failoverHistory: {
+              from: node._id,
+              to: altNode._id,
               reason: 'Manual drain',
               timestamp: new Date(),
             },

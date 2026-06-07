@@ -127,7 +127,7 @@ router.get('/:siteId', authenticateAdmin, async (req, res, next) => {
  */
 router.patch('/:siteId', authenticateAdmin, async (req, res, next) => {
   try {
-    const { type, status, assignedNodeIds, source } = req.body;
+    const { type, status, assignedNodeIds, source, activeNodeId, primaryNodeId, secondaryNodeId, fallbackNodeId } = req.body;
     const updateFields = {};
 
     if (type) updateFields.type = type;
@@ -143,6 +143,19 @@ router.patch('/:siteId', authenticateAdmin, async (req, res, next) => {
       updateFields.assignedNodes = nodes.map((n) => n._id);
     }
     if (source) updateFields.source = { ...source };
+
+    // Node assignment updates — resolve nodeId to _id
+    for (const [field, nodeId] of [['activeNode', activeNodeId], ['primaryNode', primaryNodeId], ['secondaryNode', secondaryNodeId], ['fallbackNode', fallbackNodeId]]) {
+      if (nodeId !== undefined) {
+        if (nodeId) {
+          const node = await Node.findOne({ nodeId }).select('_id').lean();
+          if (node) updateFields[field] = node._id;
+          else return res.status(400).json({ error: `Node ${nodeId} not found` });
+        } else {
+          updateFields[field] = null;
+        }
+      }
+    }
 
     const website = await Website.findOneAndUpdate(
       { siteId: req.params.siteId },
