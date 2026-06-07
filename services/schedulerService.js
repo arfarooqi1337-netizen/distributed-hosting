@@ -1,14 +1,14 @@
 /**
  * Scheduler service
  *
- * Selects the optimal node(s) for a deployment based on:
- * - Node type (TRAFFIC_NODE for websites, COMPUTE_NODE for jobs)
- * - Current scores (trafficScore, computeScore, reliabilityScore)
- * - Current load (CPU, RAM, active deployments)
- * - Mode (IDLE > NORMAL > GAMING/OFFLINE)
- * - Deployment type requirements
+ * Selects the optimal node(s) for a deployment using explicit tiered priority:
  *
- * Supports multi-node deployments for high availability.
+ *   Tier 1: Healthy TRAFFIC_NODE (IDLE/NORMAL, hosting capable, tunnel online)
+ *   Tier 2: Healthy COMPUTE_NODE with required hosting capability
+ *   Tier 3: Healthy BACKUP_NODE (online, any mode except OFFLINE)
+ *   Final:  VPS fallback.html (no node found)
+ *
+ * Within each tier, nodes are scored by current load, reliability, and mode.
  */
 
 const Node = require('../models/Node');
@@ -16,128 +16,129 @@ const Deployment = require('../models/Deployment');
 const logger = require('../config/logger');
 
 /**
- * Score a node's suitability for a specific deployment type.
- * Returns a number 0-100 where higher = better fit.
+ * Check if a node is eligible for a deployment type based on capabilities.
  */
-function scoreNodeForDeployment(node, deployType) {
-  if (!node || node.status !== 'online') return 0;
-  if (node.mode === 'OFFLINE') return 0;
-  if (node.type === 'DISABLED') return 0;
+function nodeSupportsDeployType(node, deployType) {
+  if (!node || node.status !== 'online') return false;
+  if (node.mode === 'OFFLINE') return false;
+  if (node.type === 'DISABLED') return false;
 
-  // Check runtime capabilities for deployment type
   const caps = node.capabilities || {};
-  if (deployType === 'static' && !caps.staticHostingSupported) return 0;
-  if (deployType === 'python' && !caps.dockerHostingSupported && !caps.pythonHostingSupported) return 0;
-  if (deployType === 'nodejs' && !caps.dockerHostingSupported && !caps.nodejsHostingSupported) return 0;
-  if (deployType === 'docker' && !caps.dockerHostingSupported) return 0;
+  if (deployType === 'static' && !caps.staticHostingSupported) return false;
+  if (deployType === 'python' && !caps.dockerHostingSupported && !caps.pythonHostingSupported) return false;
+  if (deployType === 'nodejs' && !caps.dockerHostingSupported && !caps.nodejsHostingSupported) return false;
+  if (deployType === 'docker' && !caps.dockerHostingSupported) return false;
 
-  // Nodes without Tailscale endpoint should not receive production traffic
-  if (!caps.tailscaleOnline && !node.tunnelEndpoint && deployType !== 'compute') return 0;
+  // Tailscale required for production traffic
+  if (!caps.tailscaleOnline && !node.tunnelEndpoint && deployType !== 'compute') return false;
 
+  return true;
+}
+
+/**
+ * Score a node within its tier (for sorting).
+ * Higher = better fit within the same tier.
+ */
+function scoreNodeWithinTier(node, deployType) {
   let score = 0;
 
-  // Base score from reliability
+  // Reliability
   score += (node.reliabilityScore || 50) * 0.2;
 
-  // Mode bonus — GAMING gets a heavy penalty but is still usable
+  // Mode bonus
   if (node.mode === 'IDLE') score += 25;
   else if (node.mode === 'NORMAL') score += 15;
-  else if (node.mode === 'GAMING') score += 5;  // Low score but still selectable
+  else if (node.mode === 'GAMING') score += 3;
 
-  // Check if node has capacity
+  // Load penalty
   const cpuLoad = node.metrics?.cpuPercent || 0;
   const ramLoad = node.metrics?.ramPercent || 0;
-
-  // Penalize high load
   if (cpuLoad > 80) score -= 20;
   else if (cpuLoad > 60) score -= 10;
   if (ramLoad > 80) score -= 20;
   else if (ramLoad > 60) score -= 10;
 
-  // Type-specific scoring
+  // Type-specific score boost
   if (deployType === 'static' || deployType === 'nodejs' || deployType === 'custom') {
-    // Website hosting — needs good bandwidth, low latency
-    if (node.type === 'TRAFFIC_NODE') score += 30;
-    else if (node.type === 'BACKUP_NODE') score += 5;  // Low priority
     score += (node.trafficScore || 0) * 0.3;
   } else if (deployType === 'docker') {
-    // Docker — needs Docker enabled
-    if (node.type === 'TRAFFIC_NODE') score += 20;
-    else if (node.type === 'BACKUP_NODE') score += 5;  // Low priority
     score += (node.computeScore || 0) * 0.3;
   } else {
-    // Default
-    if (node.type === 'BACKUP_NODE') score -= 15;  // Penalty for backup
     score += (node.score || 0) * 0.3;
   }
 
-  // Avoid nodes with too many active deployments
-  // (We check activeDeployments count - this is handled below)
-
-  return Math.round(Math.max(0, Math.min(100, score)));
+  return Math.round(Math.max(1, Math.min(100, score)));
 }
 
 /**
- * Find the best node for a deployment.
- * Returns the node document or null if none available.
+ * Find the best node for a deployment using explicit tiered priority.
  *
- * @param {string} deployType - Type of deployment
- * @param {string|string[]} excludeNodeIds - NodeId or array of nodeIds to exclude
+ * Tier 1: TRAFFIC_NODE (IDLE or NORMAL mode)
+ * Tier 2: COMPUTE_NODE that supports the hosting type
+ * Tier 3: BACKUP_NODE (any online mode)
+ *
+ * Returns the node document or null if none available.
  */
 async function findBestNode(deployType, excludeNodeIds = []) {
   const excludes = Array.isArray(excludeNodeIds) ? excludeNodeIds : [excludeNodeIds].filter(Boolean);
+  const excludeQuery = excludes.length > 0 ? { nodeId: { $nin: excludes } } : {};
 
-  let query = {
+  // ─── Tier 1: Healthy TRAFFIC_NODE ─────────────────────────────────
+  let candidates = await Node.find({
+    status: 'online',
+    mode: { $in: ['IDLE', 'NORMAL'] },
+    type: 'TRAFFIC_NODE',
+    ...excludeQuery,
+  }).lean();
+
+  const eligible = candidates.filter(n => nodeSupportsDeployType(n, deployType));
+  if (eligible.length > 0) {
+    eligible.sort((a, b) => scoreNodeWithinTier(b, deployType) - scoreNodeWithinTier(a, deployType));
+    const best = eligible[0];
+    logger.info(`[Tier 1] Selected TRAFFIC_NODE ${best.name} (score: ${scoreNodeWithinTier(best, deployType)})`);
+    return best;
+  }
+
+  // ─── Tier 2: Healthy COMPUTE_NODE with hosting capability ─────────
+  candidates = await Node.find({
     status: 'online',
     mode: { $in: ['IDLE', 'NORMAL', 'GAMING'] },
-    type: { $ne: 'DISABLED' },
-  };
+    type: 'COMPUTE_NODE',
+    ...excludeQuery,
+  }).lean();
 
-  if (excludes.length > 0) {
-    query.nodeId = { $nin: excludes };
+  const computeEligible = candidates.filter(n => nodeSupportsDeployType(n, deployType));
+  if (computeEligible.length > 0) {
+    computeEligible.sort((a, b) => scoreNodeWithinTier(b, deployType) - scoreNodeWithinTier(a, deployType));
+    const best = computeEligible[0];
+    logger.info(`[Tier 2] Selected COMPUTE_NODE ${best.name} (score: ${scoreNodeWithinTier(best, deployType)})`);
+    return best;
   }
 
-  let candidates = await Node.find(query).lean();
+  // ─── Tier 3: BACKUP_NODE (last resort) ────────────────────────────
+  candidates = await Node.find({
+    status: 'online',
+    mode: { $ne: 'OFFLINE' },
+    type: 'BACKUP_NODE',
+    ...excludeQuery,
+  }).lean();
 
-  if (candidates.length === 0) {
-    // Fallback: try anything online that isn't disabled
-    query = { status: 'online', mode: { $ne: 'OFFLINE' }, type: { $ne: 'DISABLED' } };
-    if (excludes.length > 0) query.nodeId = { $nin: excludes };
-    candidates = await Node.find(query).lean();
-    if (candidates.length > 0) {
-      logger.warn('No IDLE/NORMAL/GAMING nodes found, using any online node as fallback');
-    }
+  const backupEligible = candidates.filter(n => nodeSupportsDeployType(n, deployType));
+  if (backupEligible.length > 0) {
+    backupEligible.sort((a, b) => scoreNodeWithinTier(b, deployType) - scoreNodeWithinTier(a, deployType));
+    const best = backupEligible[0];
+    logger.info(`[Tier 3] Selected BACKUP_NODE ${best.name} (last resort)`);
+    return best;
   }
 
-  if (candidates.length === 0) {
-    logger.warn(`No available nodes for deployment. Query: ${JSON.stringify(query)}`);
-    const allNodes = await Node.find({}).select('nodeId name status mode type').lean();
-    logger.warn(`All nodes in DB: ${JSON.stringify(allNodes.map(n => ({id: n.nodeId, name: n.name, status: n.status, mode: n.mode, type: n.type})))}`);
-    return null;
-  }
-
-  // Score each candidate
-  const scored = candidates.map((node) => ({
-    node,
-    score: scoreNodeForDeployment(node, deployType),
-  }));
-
-  // Sort by score descending, take the best
-  scored.sort((a, b) => b.score - a.score);
-
-  const best = scored[0];
-  if (best.score <= 0) {
-    logger.warn(`Best available node scored 0 — no suitable node found. Candidates: ${JSON.stringify(candidates.map(n => ({name: n.name, status: n.status, mode: n.mode, type: n.type, cpu: n.metrics?.cpuPercent, ram: n.metrics?.ramPercent})))}`);
-    return null;
-  }
-
-  logger.info(`Selected node ${best.node.name} (${best.node.nodeId}) with score ${best.score} for ${deployType} deployment`);
-  return best.node;
+  // ─── No node found ────────────────────────────────────────────────
+  logger.warn(`No available nodes for ${deployType} deployment. All tiers exhausted.`);
+  return null;
 }
 
 /**
  * Find multiple nodes for multi-node/failover deployments.
- * Returns up to `count` nodes sorted by suitability.
+ * Returns up to `count` nodes using tiered priority.
  */
 async function findBestNodes(deployType, count = 2) {
   const nodes = [];
@@ -157,19 +158,15 @@ async function findBestNodes(deployType, count = 2) {
  * Check if a node has capacity for another deployment.
  */
 async function nodeHasCapacity(nodeId) {
-  // Count active deployments on this node
   const activeCount = await Deployment.countDocuments({
     assignedNodeId: nodeId,
     status: { $in: ['dispatching', 'downloading', 'building', 'deploying', 'active'] },
   });
-
-  // Allow max 5 concurrent deployments per node
   return activeCount < 5;
 }
 
 module.exports = {
   findBestNode,
   findBestNodes,
-  scoreNodeForDeployment,
   nodeHasCapacity,
 };

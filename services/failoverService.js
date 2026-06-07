@@ -2,42 +2,41 @@
  * Failover Service
  *
  * Monitors node health for multi-node website deployments and
- * automatically fails over to secondary/backup nodes when the
- * primary node goes offline or becomes unhealthy.
+ * automatically fails over to the next available node using
+ * explicit tiered priority:
  *
- * Failover chain:
- *   Primary Node → Secondary Node → Backup Node → VPS Fallback
+ *   Current active node fails
+ *   -> Tier 1: Healthy assigned TRAFFIC_NODE (IDLE/NORMAL)
+ *   -> Tier 2: Healthy assigned COMPUTE_NODE capable of hosting
+ *   -> Tier 3: Healthy assigned BACKUP_NODE
+ *   -> Final:  VPS fallback.html served from Main VPS
  *
- * The client never sees downtime — traffic is transparently
+ * The client never sees downtime -- traffic is transparently
  * routed to the next available node.
  */
 
+const mongoose = require('mongoose');
 const Website = require('../models/Website');
 const Node = require('../models/Node');
 const Alert = require('../models/Alert');
 const proxyService = require('./proxyService');
 const logger = require('../config/logger');
 
-const CHECK_INTERVAL_MS = 30000; // Check every 30 seconds
+const CHECK_INTERVAL_MS = 30000;
 
-/**
- * Check all active websites and perform failover if needed.
- */
 async function checkAndFailover(io) {
   try {
-    // Find websites with multi-node setup that are active
     const websites = await Website.find({
       status: 'active',
-      // Has at least primary + secondary OR primary + backup
       $or: [
         { secondaryNode: { $ne: null } },
         { fallbackNode: { $ne: null } },
       ],
     })
-      .populate('primaryNode', 'nodeId name status mode metrics')
-      .populate('secondaryNode', 'nodeId name status mode metrics')
-      .populate('fallbackNode', 'nodeId name status mode metrics')
-      .populate('activeNode', 'nodeId name status')
+      .populate('primaryNode', 'nodeId name status mode metrics type')
+      .populate('secondaryNode', 'nodeId name status mode metrics type')
+      .populate('fallbackNode', 'nodeId name status mode metrics type')
+      .populate('activeNode', 'nodeId name status type')
       .lean();
 
     for (const site of websites) {
@@ -48,9 +47,6 @@ async function checkAndFailover(io) {
   }
 }
 
-/**
- * Evaluate a single site's health and perform failover if needed.
- */
 async function evaluateSiteHealth(site, io) {
   const activeNode = site.activeNode || site.primaryNode;
   if (!activeNode) return;
@@ -60,106 +56,60 @@ async function evaluateSiteHealth(site, io) {
     activeNode.mode !== 'GAMING' &&
     (activeNode.metrics?.cpuPercent || 0) < 85;
 
-  if (isNodeHealthy) return; // Everything is fine
+  if (isNodeHealthy) return;
 
-  // Determine which node to fail over to
-  // Priority: TRAFFIC_NODE/COMPUTE_NODE > BACKUP_NODE > VPS fallback
-  let targetNode = null;
   let failoverReason = '';
-
   if (activeNode.status === 'offline') {
-    failoverReason = `Node ${activeNode.name} went offline`;
+    failoverReason = 'Node ' + activeNode.name + ' went offline';
   } else if (activeNode.mode === 'GAMING') {
-    failoverReason = `Node ${activeNode.name} entered GAMING mode`;
+    failoverReason = 'Node ' + activeNode.name + ' entered GAMING mode';
   } else if ((activeNode.metrics?.cpuPercent || 0) >= 85) {
-    failoverReason = `Node ${activeNode.name} CPU at ${activeNode.metrics?.cpuPercent}%`;
+    failoverReason = 'Node ' + activeNode.name + ' CPU at ' + activeNode.metrics.cpuPercent + '%';
   } else {
-    failoverReason = `Node ${activeNode.name} is unhealthy`;
+    failoverReason = 'Node ' + activeNode.name + ' is unhealthy';
   }
 
-  // Collect candidate nodes from the website's assigned nodes
-  const candidateIds = [
+  const assignedIds = [
+    site.primaryNode?._id,
     site.secondaryNode?._id,
     site.fallbackNode?._id,
-    ...(site.assignedNodes || []).map(n => n._id).filter(id => {
-      const idStr = id.toString();
-      return idStr !== site.primaryNode?._id?.toString() &&
-             idStr !== site.secondaryNode?._id?.toString() &&
-             idStr !== site.fallbackNode?._id?.toString();
-    }),
-  ].filter(Boolean);
+    ...(site.assignedNodes || []).map(n => (n._id || n)),
+  ]
+    .filter(Boolean)
+    .map(id => id.toString());
 
-  // Remove duplicates and the current active node
-  const uniqueIds = [...new Set(candidateIds.map(id => id.toString()))]
+  const candidateIds = [...new Set(assignedIds)]
     .filter(id => id !== activeNode._id?.toString());
 
-  if (uniqueIds.length > 0) {
-    // Find the best healthy node — prefer TRAFFIC_NODE over BACKUP_NODE
-    const candidates = await Node.find({
-      _id: { $in: uniqueIds.map(id => require('mongoose').Types.ObjectId(id)) },
-      status: 'online',
-      mode: { $nin: ['OFFLINE', 'GAMING'] },
-    })
-      .sort({ type: 1, score: -1 }) // TRAFFIC_NODE first (alphabetically), then by score
-      .lean();
-
-    // Pick the best candidate: prefer non-BACKUP_NODE types
-    const bestCandidate = candidates.find(n => n.type !== 'BACKUP_NODE') || candidates[0];
-    if (bestCandidate) {
-      targetNode = bestCandidate;
-    }
-  }
-
-  if (!targetNode) {
-    logger.warn(`No failover target for ${site.domain} — routing to VPS fallback`);
-    // Set website to VPS fallback mode — Caddy will route to a local maintenance page
-    await Website.updateOne(
-      { siteId: site.siteId },
-      {
-        $set: {
-          activeNode: null,
-          healthStatus: 'down',
-        },
-        $inc: { failoverCount: 1 },
-        $push: {
-          failoverHistory: {
-            from: activeNode._id,
-            to: null,
-            reason: failoverReason + ' — VPS fallback activated',
-            timestamp: new Date(),
-          },
-        },
-      }
-    );
-    await createFailoverAlert(site, failoverReason, 'vps_fallback', io);
-    // Update proxy to serve fallback page
-    proxyService.generateCaddyfile().catch(() => {});
-    proxyService.reloadCaddy().catch(() => {});
+  if (candidateIds.length === 0) {
+    await goToVpsFallback(site, failoverReason, io);
     return;
   }
 
-  // Check if target node is healthy — must be actively serving, not gaming
+  const targetNode = await findBestFailoverTarget(candidateIds, site);
+
+  if (!targetNode) {
+    await goToVpsFallback(site, failoverReason, io);
+    return;
+  }
+
   const isTargetHealthy = targetNode.status === 'online' &&
     targetNode.mode !== 'OFFLINE' &&
     targetNode.mode !== 'GAMING' &&
     (targetNode.metrics?.cpuPercent || 0) < 80;
 
   if (!isTargetHealthy) {
-    logger.warn(`Failover target ${targetNode.name} is also unhealthy for ${site.domain}`);
-    await createFailoverAlert(site, failoverReason, 'target_unhealthy', io);
+    logger.warn('Failover target ' + targetNode.name + ' is also unhealthy for ' + site.domain);
+    await goToVpsFallback(site, failoverReason + ' (tried ' + targetNode.name + ')', io);
     return;
   }
 
-  // Perform the failover
-  logger.info(`Failing over ${site.domain} from ${activeNode.name} to ${targetNode.name}: ${failoverReason}`);
+  logger.info('Failing over ' + site.domain + ': ' + activeNode.name + ' -> ' + targetNode.name);
 
   await Website.updateOne(
     { siteId: site.siteId },
     {
-      $set: {
-        activeNode: targetNode._id,
-        lastFailoverAt: new Date(),
-      },
+      $set: { activeNode: targetNode._id, healthStatus: 'degraded' },
       $inc: { failoverCount: 1 },
       $push: {
         failoverHistory: {
@@ -172,23 +122,26 @@ async function evaluateSiteHealth(site, io) {
     }
   );
 
-  // Update proxy routing for the failover
-  const deployment = await require('../models/Deployment').findOne({
+  const Deployment = require('../models/Deployment');
+  const deployment = await Deployment.findOne({
     siteId: site.siteId,
     status: 'active',
-  }).sort({ version: -1 }).lean();
+  }).sort({ createdAt: -1 }).lean();
 
-  if (deployment) {
-    // Re-register site with proxy using the new active node
-    await proxyService.registerSite(deployment.deploymentId).catch(() => {});
-    await proxyService.generateCaddyfile().catch(() => {});
-    await proxyService.reloadCaddy().catch(() => {});
+  if (deployment && site.domain) {
+    await proxyService.registerSite({
+      siteId: site.siteId,
+      domain: site.domain,
+      deploymentId: deployment.deploymentId,
+      nodeId: targetNode.nodeId,
+      nodeName: targetNode.name,
+      port: deployment.containerInfo?.exposedPort || 8080,
+      targetAddress: targetNode.tunnelEndpoint || 'localhost:' + (deployment.containerInfo?.exposedPort || 8080),
+    });
   }
 
-  // Create alert
-  await createFailoverAlert(site, failoverReason, `failed_over_to_${targetNode.name}`, io);
+  await createFailoverAlert(site, failoverReason, 'failover_completed', io);
 
-  // Emit real-time update
   if (io) {
     io.to('admin').emit('website:failover', {
       siteId: site.siteId,
@@ -201,42 +154,119 @@ async function evaluateSiteHealth(site, io) {
 }
 
 /**
- * Create a failover alert.
+ * Tier 1: TRAFFIC_NODE (IDLE/NORMAL)
+ * Tier 2: COMPUTE_NODE (IDLE/NORMAL/GAMING)
+ * Tier 3: BACKUP_NODE (online, not OFFLINE)
  */
-async function createFailoverAlert(site, reason, action, io) {
-  const Alert = require('../models/Alert');
-  const { v4: uuidv4 } = require('uuid');
-
-  const alert = await Alert.create({
-    alertId: `alert_${uuidv4().split('-')[0]}`,
-    type: 'website_down',
-    severity: action === 'no_target' ? 'critical' : 'warning',
-    message: `Website ${site.domain}: ${reason}. Action: ${action}`,
-    nodeId: site.activeNode?.nodeId || '',
-    nodeName: site.activeNode?.name || '',
-    metadata: {
-      siteId: site.siteId,
-      domain: site.domain,
-      reason,
-      action,
-    },
+async function findBestFailoverTarget(candidateIds, site) {
+  const objectIds = candidateIds.map(function(id) {
+    return new mongoose.Types.ObjectId(id);
   });
 
+  // Tier 1: Healthy TRAFFIC_NODE
+  var candidates = await Node.find({
+    _id: { $in: objectIds },
+    status: 'online',
+    mode: { $in: ['IDLE', 'NORMAL'] },
+    type: 'TRAFFIC_NODE',
+  }).sort({ score: -1 }).limit(5).lean();
+
+  if (candidates.length > 0) {
+    logger.info('[Failover Tier 1] Using TRAFFIC_NODE: ' + candidates[0].name);
+    return candidates[0];
+  }
+
+  // Tier 2: Healthy COMPUTE_NODE
+  candidates = await Node.find({
+    _id: { $in: objectIds },
+    status: 'online',
+    mode: { $in: ['IDLE', 'NORMAL', 'GAMING'] },
+    type: 'COMPUTE_NODE',
+  }).sort({ score: -1 }).limit(5).lean();
+
+  if (candidates.length > 0) {
+    logger.info('[Failover Tier 2] Using COMPUTE_NODE: ' + candidates[0].name);
+    return candidates[0];
+  }
+
+  // Tier 3: BACKUP_NODE (last resort)
+  candidates = await Node.find({
+    _id: { $in: objectIds },
+    status: 'online',
+    mode: { $ne: 'OFFLINE' },
+    type: 'BACKUP_NODE',
+  }).sort({ score: -1 }).limit(5).lean();
+
+  if (candidates.length > 0) {
+    logger.info('[Failover Tier 3] Falling back to BACKUP_NODE: ' + candidates[0].name);
+    return candidates[0];
+  }
+
+  return null;
+}
+
+async function goToVpsFallback(site, reason, io) {
+  logger.warn('VPS fallback for ' + site.domain + ': ' + reason);
+
+  await Website.updateOne(
+    { siteId: site.siteId },
+    {
+      $set: { activeNode: null, healthStatus: 'down' },
+      $inc: { failoverCount: 1 },
+      $push: {
+        failoverHistory: {
+          from: site.activeNode?._id,
+          to: null,
+          reason: reason + ' -- VPS fallback',
+          timestamp: new Date(),
+        },
+      },
+    }
+  );
+
+  await createFailoverAlert(site, reason, 'vps_fallback', io);
+  proxyService.generateCaddyfile().catch(function() {});
+  proxyService.reloadCaddy().catch(function() {});
+
   if (io) {
-    io.to('admin').emit('alert:new', alert.toJSON());
+    io.to('admin').emit('website:failover', {
+      siteId: site.siteId,
+      domain: site.domain,
+      from: site.activeNode?.name || 'unknown',
+      to: 'VPS fallback',
+      reason: reason,
+    });
   }
 }
 
-/**
- * Start the failover monitoring service.
- */
+async function createFailoverAlert(site, reason, action, io) {
+  var uuidv4 = require('uuid').v4;
+  try {
+    var alert = await Alert.create({
+      alertId: 'alert_' + uuidv4().split('-')[0],
+      type: 'failover',
+      severity: action === 'vps_fallback' ? 'critical' : 'warning',
+      message: 'Failover for ' + site.domain + ': ' + reason,
+      nodeId: site.activeNode?.nodeId || '',
+      nodeName: site.activeNode?.name || 'unknown',
+      metadata: { siteId: site.siteId, domain: site.domain, action: action },
+    });
+    if (io) {
+      io.to('admin').emit('alert:new', alert.toJSON());
+    }
+  } catch (error) {
+    logger.error('Failed to create failover alert:', error.message);
+  }
+}
+
 function startFailoverService(io) {
-  logger.info('Starting failover monitoring service (interval: 30s)');
   checkAndFailover(io);
-  return setInterval(() => checkAndFailover(io), CHECK_INTERVAL_MS);
+  return setInterval(function() {
+    checkAndFailover(io);
+  }, CHECK_INTERVAL_MS);
 }
 
 module.exports = {
-  checkAndFailover,
-  startFailoverService,
+  startFailoverService: startFailoverService,
+  checkAndFailover: checkAndFailover,
 };
