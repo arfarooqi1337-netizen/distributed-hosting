@@ -13,6 +13,7 @@
 const Node = require('../models/Node');
 const Alert = require('../models/Alert');
 const { recalculateNodeScores } = require('./nodeScoring');
+const { checkAndRecoverNode } = require('./recoveryService');
 const logger = require('../config/logger');
 
 /**
@@ -109,14 +110,16 @@ async function processHeartbeat(node, heartbeatData, io) {
       tailscaleOnline: 'capabilities.tailscaleOnline',
       tailscaleIp: 'capabilities.tailscaleIp',
       dockerInstalled: 'capabilities.dockerInstalled',
-      dockerRunning: 'capabilities.dockerRunning',
+      dockerDaemonRunning: 'capabilities.dockerDaemonRunning',
+      dockerCliWorking: 'capabilities.dockerCliWorking',
+      dockerInfoOk: 'capabilities.dockerInfoOk',
       dockerVersion: 'capabilities.dockerVersion',
+      dockerHostingSupported: 'capabilities.dockerHostingSupported',
       wslEnabled: 'capabilities.wslEnabled',
       agentServiceInstalled: 'capabilities.agentServiceInstalled',
       agentServiceRunning: 'capabilities.agentServiceRunning',
       autoStartEnabled: 'capabilities.autoStartEnabled',
       staticHostingSupported: 'capabilities.staticHostingSupported',
-      dockerHostingSupported: 'capabilities.dockerHostingSupported',
       pythonHostingSupported: 'capabilities.pythonHostingSupported',
       nodejsHostingSupported: 'capabilities.nodejsHostingSupported',
     };
@@ -139,6 +142,17 @@ async function processHeartbeat(node, heartbeatData, io) {
 
   // Update node in database
   await Node.updateOne({ nodeId: node.nodeId }, { $set: updateFields });
+
+  // Check if node just came back online — trigger workload recovery
+  if (previousStatus === 'offline' && updateFields.status === 'online') {
+    const recoveredNode = await Node.findOne({ nodeId: node.nodeId });
+    if (recoveredNode) {
+      // Fire and forget — recovery runs asynchronously
+      checkAndRecoverNode(recoveredNode, io).catch(err => {
+        logger.error(`Recovery error for ${node.nodeId}: ${err.message}`);
+      });
+    }
+  }
 
   // Re-fetch updated node for scoring
   const updatedNode = await Node.findOne({ nodeId: node.nodeId });
@@ -166,6 +180,52 @@ async function processHeartbeat(node, heartbeatData, io) {
       nodeName: updatedNode.name,
       metadata: { uploadMbps },
     }, io);
+  }
+
+  // Check for high resource usage
+  const cpuPercent = sanitizedMetrics.cpu.percent || 0;
+  const ramPercent = sanitizedMetrics.ram.percent || 0;
+  if (cpuPercent > 90) {
+    await createAlert({
+      type: 'high_cpu',
+      severity: 'warning',
+      message: `Node ${updatedNode.name} CPU at ${cpuPercent.toFixed(1)}%`,
+      nodeId: updatedNode.nodeId,
+      nodeName: updatedNode.name,
+      metadata: { cpuPercent },
+    }, io);
+  }
+  if (ramPercent > 90) {
+    await createAlert({
+      type: 'high_ram',
+      severity: 'warning',
+      message: `Node ${updatedNode.name} RAM at ${ramPercent.toFixed(1)}%`,
+      nodeId: updatedNode.nodeId,
+      nodeName: updatedNode.name,
+      metadata: { ramPercent },
+    }, io);
+  }
+
+  // Check for Docker/Tailscale status changes
+  if (capabilities) {
+    if (capabilities.dockerDaemonRunning === false && node.capabilities?.dockerDaemonRunning === true) {
+      await createAlert({
+        type: 'docker_offline',
+        severity: 'warning',
+        message: `Docker daemon stopped on node ${updatedNode.name}`,
+        nodeId: updatedNode.nodeId,
+        nodeName: updatedNode.name,
+      }, io);
+    }
+    if (capabilities.tailscaleOnline === false && node.capabilities?.tailscaleOnline === true) {
+      await createAlert({
+        type: 'tailscale_offline',
+        severity: 'warning',
+        message: `Tailscale disconnected on node ${updatedNode.name}`,
+        nodeId: updatedNode.nodeId,
+        nodeName: updatedNode.name,
+      }, io);
+    }
   }
 
   // Emit real-time update

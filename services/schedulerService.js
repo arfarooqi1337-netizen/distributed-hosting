@@ -30,8 +30,8 @@ function scoreNodeForDeployment(node, deployType) {
   // Check runtime capabilities for deployment type
   const caps = node.capabilities || {};
   if (deployType === 'static' && !caps.staticHostingSupported) return 0;
-  if (deployType === 'python' && !caps.pythonHostingSupported && !caps.dockerHostingSupported) return 0;
-  if (deployType === 'nodejs' && !caps.nodejsHostingSupported && !caps.dockerHostingSupported) return 0;
+  if (deployType === 'python' && !caps.dockerHostingSupported && !caps.pythonHostingSupported) return 0;
+  if (deployType === 'nodejs' && !caps.dockerHostingSupported && !caps.nodejsHostingSupported) return 0;
   if (deployType === 'docker' && !caps.dockerHostingSupported) return 0;
 
   // Nodes without Tailscale endpoint should not receive production traffic

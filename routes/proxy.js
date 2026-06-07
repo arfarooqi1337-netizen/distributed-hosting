@@ -39,16 +39,23 @@ router.get('/status', authenticateAdmin, async (req, res, next) => {
 router.post('/reload', authenticateAdmin, async (req, res, next) => {
   try {
     await proxyService.generateCaddyfile();
-    await proxyService.reloadCaddy();
-    
+    const reloaded = await proxyService.reloadCaddy();
+    const lastError = proxyService.getLastCaddyError();
+
     const io = req.app.get('io');
     if (io) {
-      io.to('admin').emit('proxy:update', { message: 'Proxy configuration reloaded', timestamp: new Date() });
+      io.to('admin').emit('proxy:update', {
+        message: reloaded ? 'Proxy configuration reloaded' : 'Proxy reload failed',
+        success: reloaded,
+        error: lastError,
+        timestamp: new Date(),
+      });
     }
-    
+
     res.json({
-      success: true,
-      message: 'Proxy configuration reloaded',
+      success: reloaded,
+      message: reloaded ? 'Proxy configuration reloaded' : 'Proxy reload failed',
+      error: lastError || null,
       routingTable: proxyService.getRoutingTable(),
     });
   } catch (error) {

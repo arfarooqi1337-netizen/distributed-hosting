@@ -24,10 +24,14 @@ const Website = require('../models/Website');
 const Node = require('../models/Node');
 const Deployment = require('../models/Deployment');
 const logger = require('../config/logger');
+const config = require('../config');
 const tunnelService = require('./tunnelService');
 
 const CADDYFILE_PATH = path.join(__dirname, '..', 'Caddyfile');
 const CADDY_DATA_DIR = path.join(__dirname, '..', 'caddy_data');
+
+// Resolve Caddy binary path from config or default
+const CADDY_BIN = config.proxy?.caddyPath || 'caddy';
 
 // In-memory routing table: domain → { nodeId, nodeName, port, siteId }
 const routingTable = new Map();
@@ -42,8 +46,8 @@ let proxyEnabled = false;
 async function initProxy() {
   // Check if Caddy is installed
   try {
-    const result = require('child_process').execSync('caddy version', { encoding: 'utf8', stdio: 'pipe' });
-    logger.info(`Caddy found: ${result.trim()}`);
+    const result = require('child_process').execSync(`${CADDY_BIN} version`, { encoding: 'utf8', stdio: 'pipe' });
+    logger.info(`Caddy found: ${result.trim()} (path: ${CADDY_BIN})`);
     proxyEnabled = true;
   } catch {
     logger.warn('Caddy not found in PATH. Install Caddy for reverse proxy support.');
@@ -438,7 +442,7 @@ async function startCaddy() {
   }
 
   try {
-    caddyProcess = spawn('caddy', ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile'], {
+    caddyProcess = spawn(CADDY_BIN, ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
@@ -486,19 +490,53 @@ async function startCaddy() {
 /**
  * Reload Caddy configuration gracefully.
  */
+let lastCaddyError = null;
+
+function getLastCaddyError() {
+  return lastCaddyError;
+}
+
 async function reloadCaddy() {
   if (!proxyEnabled || !caddyProcess) return false;
 
   try {
     const { execSync } = require('child_process');
-    execSync(`caddy reload --config "${CADDYFILE_PATH}"`, {
+    execSync(`${CADDY_BIN} reload --config "${CADDYFILE_PATH}"`, {
       stdio: 'pipe',
       timeout: 10000,
     });
-    logger.info('Caddy configuration reloaded successfully');
+    lastCaddyError = null;
+    logger.info(`Caddy configuration reloaded successfully (${CADDY_BIN})`);
     return true;
   } catch (error) {
+    lastCaddyError = error.message;
     logger.warn(`Caddy reload error: ${error.message}`);
+
+    // Emit proxy:update via app io if available
+    try {
+      // We can't access io directly here, but the event will be emitted
+      // by the route handlers that call reloadCaddy
+    } catch (emitErr) {
+      // silent
+    }
+
+    // Try to create alert for Caddy reload failure
+    try {
+      const Alert = require('../models/Alert');
+      const { v4: uuidv4 } = require('uuid');
+      const alert = await Alert.create({
+        alertId: `alert_${uuidv4().split('-')[0]}`,
+        type: 'caddy_reload_failed',
+        severity: 'critical',
+        message: `Caddy reload failed: ${error.message}`,
+        nodeId: '',
+        nodeName: 'VPS',
+        metadata: { error: error.message, caddyPath: CADDY_BIN },
+      });
+    } catch (alertErr) {
+      logger.warn(`Could not create Caddy alert: ${alertErr.message}`);
+    }
+
     return false;
   }
 }
@@ -538,6 +576,8 @@ function getProxyStatus() {
     running: caddyProcess !== null,
     routes: routingTable.size,
     caddyfile: CADDYFILE_PATH,
+    caddyPath: CADDY_BIN,
+    lastError: lastCaddyError,
     routingTable: Array.from(routingTable.values()),
   };
 }
@@ -553,5 +593,6 @@ module.exports = {
   stopCaddy,
   reloadCaddy,
   getProxyStatus,
+  getLastCaddyError,
   rebuildRoutingTable,
 };

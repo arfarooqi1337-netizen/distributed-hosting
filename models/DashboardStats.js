@@ -18,6 +18,8 @@ const dashboardStatsSchema = new mongoose.Schema(
     onlineNodes: { type: Number, default: 0 },
     offlineNodes: { type: Number, default: 0 },
     gamingNodes: { type: Number, default: 0 },
+    dockerReadyNodes: { type: Number, default: 0 },
+    tailscaleReadyNodes: { type: Number, default: 0 },
     trafficNodes: { type: Number, default: 0 },
     computeNodes: { type: Number, default: 0 },
     backupNodes: { type: Number, default: 0 },
@@ -31,11 +33,18 @@ const dashboardStatsSchema = new mongoose.Schema(
     totalDiskAvailableGb: { type: Number, default: 0 },
     // Websites
     activeWebsites: { type: Number, default: 0 },
+    unhealthyWebsites: { type: Number, default: 0 },
+    // Deployments
+    activeDeployments: { type: Number, default: 0 },
+    failedDeployments: { type: Number, default: 0 },
+    runningContainers: { type: Number, default: 0 },
+    // Failovers
+    recentFailovers: { type: Number, default: 0 },
+    // Alerts
+    unacknowledgedAlerts: { type: Number, default: 0 },
     // Jobs
     pendingJobs: { type: Number, default: 0 },
     runningJobs: { type: Number, default: 0 },
-    // Alerts
-    unacknowledgedAlerts: { type: Number, default: 0 },
     // Timestamp
     updatedAt: { type: Date, default: Date.now },
   },

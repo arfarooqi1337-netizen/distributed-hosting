@@ -109,6 +109,12 @@ router.post('/:nodeId/drain', authenticateAdmin, auditMiddleware, async (req, re
             },
           });
         }
+
+        // Wait for deployment to complete on target (poll up to 30s)
+        const deployConfirmed = await waitForDeploymentConfirmation(activeDeployment.deploymentId, altNode.nodeId, 30000);
+        if (!deployConfirmed) {
+          logger.warn(`Drain: deployment ${activeDeployment.deploymentId} not confirmed on ${altNode.name}, continuing anyway`);
+        }
       }
 
       // Update website to point to new active node
@@ -147,7 +153,7 @@ router.post('/:nodeId/drain', authenticateAdmin, auditMiddleware, async (req, re
         });
       }
 
-      evacuatedWebsites.push({ siteId: site.siteId, domain: site.domain, movedTo: altNode.name });
+      evacuatedWebsites.push({ siteId: site.siteId, domain: site.domain, movedTo: altNode.name, confirmed: deployConfirmed || false });
     }
 
     // Mark node as disabled
@@ -164,10 +170,16 @@ router.post('/:nodeId/drain', authenticateAdmin, auditMiddleware, async (req, re
 
     logger.info(`Node ${node.name} drained. ${evacuatedWebsites.length} websites moved.`);
 
+    const succeeded = evacuatedWebsites.filter(w => w.confirmed);
+    const partial = evacuatedWebsites.filter(w => !w.confirmed);
+
     res.json({
-      success: true,
-      message: `Node drained. ${evacuatedWebsites.length} websites moved to alternative nodes.`,
+      success: partial.length === 0,
+      message: partial.length === 0
+        ? `Node drained. ${evacuatedWebsites.length} websites moved successfully.`
+        : `Node partially drained. ${succeeded.length} moved, ${partial.length} may need manual verification.`,
       websitesMoved: evacuatedWebsites.length,
+      websitesConfirmed: succeeded.length,
       alternativeNodes: altNodes.length,
       details: evacuatedWebsites,
     });
@@ -175,6 +187,35 @@ router.post('/:nodeId/drain', authenticateAdmin, auditMiddleware, async (req, re
     next(error);
   }
 });
+
+/**
+ * Poll for deployment confirmation on a target node.
+ * Returns true if the deployment reaches 'active' or 'completed' status within timeout.
+ */
+async function waitForDeploymentConfirmation(deploymentId, nodeId, timeoutMs) {
+  const pollInterval = 1000;
+  let waited = 0;
+
+  while (waited < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    waited += pollInterval;
+
+    const dep = await Deployment.findOne({ deploymentId }).lean();
+    if (!dep) return false;
+
+    // Check if the specific node's nodeResult is active
+    if (dep.nodeResults && Array.isArray(dep.nodeResults)) {
+      const nodeResult = dep.nodeResults.find(nr => nr.nodeId === nodeId);
+      if (nodeResult && nodeResult.status === 'active') return true;
+    }
+
+    // Also check deployment-level status
+    if (dep.status === 'active') return true;
+    if (dep.status === 'failed') return false;
+  }
+
+  return false;
+}
 
 /**
  * POST /api/nodes/:nodeId/maintenance

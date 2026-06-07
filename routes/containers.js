@@ -103,19 +103,22 @@ router.post('/:nodeId/action', authenticateAdmin, auditMiddleware, async (req, r
 
 /**
  * POST /api/containers/:nodeId/logs
- * Request container logs from a node
+ * Request container logs from a node and wait for the result
  */
 router.post('/:nodeId/logs', authenticateAdmin, async (req, res, next) => {
   try {
-    const { containerId } = req.body;
+    const { containerId, tail, since, timestamps } = req.body;
     if (!containerId) return res.status(400).json({ error: 'containerId is required' });
+
+    const tailLines = tail || 200;
+    const includeTimestamps = timestamps !== undefined ? timestamps : true;
 
     const commandId = uuidv4();
     await Command.create({
       commandId,
       nodeId: req.params.nodeId,
       command: 'get_container_logs',
-      params: { container_id: containerId, tail: 200 },
+      params: { container_id: containerId, tail: tailLines, since: since || '', timestamps: includeTimestamps },
       status: 'pending',
       createdBy: req.admin.email,
     });
@@ -125,11 +128,59 @@ router.post('/:nodeId/logs', authenticateAdmin, async (req, res, next) => {
       io.to(`node:${req.params.nodeId}`).emit('command:new', {
         commandId,
         command: 'get_container_logs',
-        params: { container_id: containerId, tail: 200 },
+        params: { container_id: containerId, tail: tailLines, since: since || '', timestamps: includeTimestamps },
       });
     }
 
-    res.json({ success: true, message: 'Log request dispatched', commandId });
+    // Poll for command completion with timeout
+    const maxWait = 15000; // 15 seconds max
+    const pollInterval = 500; // Check every 500ms
+    let waited = 0;
+
+    while (waited < maxWait) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      waited += pollInterval;
+
+      const cmd = await Command.findOne({ commandId }).lean();
+      if (!cmd) break;
+
+      if (cmd.status === 'completed' || cmd.status === 'failed') {
+        const result = cmd.result || {};
+        if (result.logs && Array.isArray(result.logs)) {
+          return res.json({
+            success: true,
+            commandId,
+            containerId,
+            containerName: result.container_name || '',
+            logs: result.logs,
+            count: result.count || result.logs.length,
+            status: cmd.status,
+          });
+        }
+        // If result has no logs, return result as-is
+        return res.json({
+          success: cmd.status === 'completed',
+          commandId,
+          containerId,
+          logs: result.logs || [],
+          message: result.message || 'No logs returned',
+          status: cmd.status,
+        });
+      }
+    }
+
+    // Timeout — return what we have
+    const cmd = await Command.findOne({ commandId }).lean();
+    const result = (cmd && cmd.result) || {};
+    return res.json({
+      success: false,
+      commandId,
+      containerId,
+      logs: result.logs || [],
+      message: 'Log request timed out — agent may be unreachable',
+      status: cmd ? cmd.status : 'timeout',
+      partial: true,
+    });
   } catch (error) {
     next(error);
   }
