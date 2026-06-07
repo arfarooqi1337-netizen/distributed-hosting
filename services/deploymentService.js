@@ -292,8 +292,9 @@ async function processDeployment(deploymentId, io) {
 /**
  * Handle a deployment status report from a node.
  * Called when the node acknowledges the deploy command with a result.
+ * Uses the reporting node's ID to update the correct nodeResults entry.
  */
-async function handleDeploymentReport(deploymentId, report) {
+async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
   try {
     const { status, progress, message, containerId, containerName, port } = report;
     const updateFields = {};
@@ -328,6 +329,29 @@ async function handleDeploymentReport(deploymentId, report) {
     }
 
     await Deployment.updateOne({ deploymentId }, { $set: updateFields });
+
+    // Update the nodeResults entry for the reporting node
+    if (reportingNodeId) {
+      const deployment = await Deployment.findOne({ deploymentId }).lean();
+      if (deployment && deployment.nodeResults) {
+        const updatedResults = deployment.nodeResults.map(nr => {
+          if (nr.nodeId === reportingNodeId) {
+            return {
+              ...nr,
+              status: status || nr.status,
+              containerId: containerId || nr.containerId,
+              containerName: containerName || nr.containerName,
+              port: port || nr.port,
+              completedAt: status === 'active' || status === 'failed' ? new Date() : nr.completedAt,
+              error: status === 'failed' ? (message || 'Unknown error') : nr.error,
+              progress: progress !== undefined ? progress : nr.progress,
+            };
+          }
+          return nr;
+        });
+        await Deployment.updateOne({ deploymentId }, { $set: { nodeResults: updatedResults } });
+      }
+    }
 
     // If deployment succeeded, update the website
     if (status === 'active') {

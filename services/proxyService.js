@@ -102,60 +102,100 @@ async function rebuildRoutingTable() {
  * Register a deployed site with the reverse proxy.
  * Called when a deployment succeeds.
  */
-async function registerSite(deploymentId) {
-  const deployment = await Deployment.findOne({ deploymentId })
-    .populate('assignedNode', 'nodeId name')
-    .lean();
+async function registerSite(deploymentOrOptions) {
+  // Support both: registerSite(deploymentId) and registerSite({ siteId, domain, nodeId, nodeName, port, ... })
+  if (typeof deploymentOrOptions === 'string') {
+    // Legacy: called with deploymentId — look up via Website.activeNode
+    const deployment = await Deployment.findOne({ deploymentId: deploymentOrOptions })
+      .lean();
+    if (!deployment || deployment.status !== 'active') return false;
 
-  if (!deployment || deployment.status !== 'active') return false;
-  if (!deployment.assignedNode) return false;
+    // Look up website to get the active node (may have changed after failover)
+    const website = await Website.findOne({ siteId: deployment.siteId })
+      .populate('activeNode', 'nodeId name tailscaleIP ipAddress')
+      .lean();
 
-  const port = deployment.containerInfo?.exposedPort;
-  if (!port) {
-    logger.warn(`Cannot register site ${deployment.domain}: no exposed port`);
-    return false;
-  }
-
-  routingTable.set(deployment.domain, {
-    deploymentId: deployment.deploymentId,
-    siteId: deployment.siteId,
-    domain: deployment.domain,
-    nodeId: deployment.assignedNode.nodeId,
-    nodeName: deployment.assignedNode.name,
-    port,
-    version: deployment.version,
-  });
-
-  // Resolve the actual address — use tunnel endpoint if available, else localhost
-  const nodeAddress = await tunnelService.getNodeAddress(
-    deployment.assignedNode.nodeId,
-    port
-  );
-  const targetAddress = nodeAddress || `localhost:${port}`;
-
-  routingTable.set(deployment.domain, {
-    deploymentId: deployment.deploymentId,
-    siteId: deployment.siteId,
-    domain: deployment.domain,
-    nodeId: deployment.assignedNode.nodeId,
-    nodeName: deployment.assignedNode.name,
-    port,
-    targetAddress,
-    version: deployment.version,
-  });
-
-  logger.info(`Registered route: ${deployment.domain} → ${targetAddress}`);
-
-  // Update Website with proxy info
-  await Website.updateOne(
-    { siteId: deployment.siteId },
-    {
-      $set: {
-        'ports.http': port,
-        'ports.https': port,
-      },
+    // Use activeNode if available, otherwise fall back to deployment's assignedNode
+    let targetNode;
+    if (website?.activeNode) {
+      targetNode = website.activeNode;
+    } else {
+      const Node = require('../models/Node');
+      targetNode = await Node.findOne({ nodeId: deployment.assignedNodeId })
+        .select('nodeId name tailscaleIP ipAddress')
+        .lean();
     }
-  );
+
+    if (!targetNode) return false;
+
+    const port = deployment.containerInfo?.exposedPort;
+    if (!port) {
+      logger.warn(`Cannot register site ${deployment.domain}: no exposed port`);
+      return false;
+    }
+
+    // Resolve the actual address — use tunnel endpoint if available, else localhost
+    const nodeAddress = await tunnelService.getNodeAddress(
+      targetNode.nodeId,
+      port
+    );
+    const targetAddress = nodeAddress || (targetNode.tailscaleIP ? `${targetNode.tailscaleIP}:${port}` : `localhost:${port}`);
+
+    routingTable.set(deployment.domain, {
+      deploymentId: deployment.deploymentId,
+      siteId: deployment.siteId,
+      domain: deployment.domain,
+      nodeId: targetNode.nodeId,
+      nodeName: targetNode.name,
+      port,
+      targetAddress,
+      version: deployment.version,
+    });
+
+    logger.info(`Registered route: ${deployment.domain} → ${targetAddress} (node: ${targetNode.name})`);
+
+    // Update Website with proxy info
+    await Website.updateOne(
+      { siteId: deployment.siteId },
+      {
+        $set: {
+          'ports.http': port,
+          'ports.https': port,
+        },
+      }
+    );
+  } else {
+    // Called with direct options object (e.g., from drain/evacuation)
+    const opts = deploymentOrOptions;
+    if (!opts.domain || !opts.port) return false;
+
+    const nodeAddress = opts.targetAddress || `localhost:${opts.port}`;
+
+    routingTable.set(opts.domain, {
+      deploymentId: opts.deploymentId || '',
+      siteId: opts.siteId || '',
+      domain: opts.domain,
+      nodeId: opts.nodeId || '',
+      nodeName: opts.nodeName || '',
+      port: opts.port,
+      targetAddress: nodeAddress,
+      version: opts.version || 1,
+    });
+
+    logger.info(`Registered route: ${opts.domain} → ${nodeAddress} (node: ${opts.nodeName})`);
+
+    if (opts.siteId) {
+      await Website.updateOne(
+        { siteId: opts.siteId },
+        {
+          $set: {
+            'ports.http': opts.port,
+            'ports.https': opts.port,
+          },
+        }
+      );
+    }
+  }
 
   // Regenerate Caddyfile and reload
   await generateCaddyfile();
@@ -202,25 +242,16 @@ async function generateCaddyfile() {
   if (!proxyEnabled) return false;
 
   const entries = Array.from(routingTable.values());
-  if (entries.length === 0) {
-    // Write a minimal Caddyfile with just a health check endpoint
-    const minimal = `# Distributed Hosting Platform — Auto-generated Caddyfile
-# No active sites to route.
 
-:2015 {
-    bind 127.0.0.1
-    header Content-Type "application/json"
-    respond "{\\"status\\":\\"ok\\",\\"message\\":\\"Caddy reverse proxy is running\\",\\"sites\\":0}"
-}
-`;
-    fs.writeFileSync(CADDYFILE_PATH, minimal, 'utf8');
-    logger.debug('Generated minimal Caddyfile (no active sites)');
-    return true;
-  }
+  // Also load VPS fallback sites (activeNode = null, status = active)
+  const fallbackSites = await Website.find({
+    status: 'active',
+    activeNode: null,
+  }).lean();
 
   let caddyfile = `# Distributed Hosting Platform — Auto-generated Caddyfile
 # Last updated: ${new Date().toISOString()}
-# Managed sites: ${entries.length}
+# Managed sites: ${entries.length}${fallbackSites.length > 0 ? `, fallback: ${fallbackSites.length}` : ''}
 
 {
     admin off
@@ -237,13 +268,11 @@ async function generateCaddyfile() {
 
 `;
 
+  // Add active site routes
   for (const entry of entries) {
     const target = entry.targetAddress || `localhost:${entry.port}`;
     const siteId = entry.siteId || 'unknown';
     const nodeName = entry.nodeName || 'unknown';
-
-    // Generate TLS config for the domain
-    // Caddy auto-provisions Let's Encrypt certificates for public domains
     const isPublicDomain = entry.domain !== 'localhost' &&
                            !entry.domain.endsWith('.localhost') &&
                            !entry.domain.endsWith('.local') &&
@@ -258,9 +287,6 @@ async function generateCaddyfile() {
       caddyfile += `# Site: ${entry.domain} (v${entry.version}) — deployed on ${nodeName}
 ${entry.domain} {
     # Auto TLS via Let's Encrypt
-    tls {
-        dns tailor  # Uses Tailscale DNS for ACME validation
-    }
     
     # Route to node container${entry.targetAddress ? '\n    # Tunnel: ' + entry.targetAddress : ''}
     reverse_proxy ${target} {
@@ -317,6 +343,47 @@ ${entry.domain} {
 # Local alias — access via http://{siteId}.localhost
 ${siteId}.localhost {
     reverse_proxy ${target}
+}
+
+`;
+    }
+  }
+
+  // Add VPS fallback routes for sites with no active node
+  const fallbackPath = `${CADDY_DATA_DIR.replace(/\\/g, '/')}/fallback.html`;
+  for (const site of fallbackSites) {
+    const isPublicDomain = site.domain !== 'localhost' &&
+                           !site.domain.endsWith('.localhost') &&
+                           !site.domain.endsWith('.local') &&
+                           !site.domain.endsWith('.test');
+
+    if (isPublicDomain) {
+      caddyfile += `# VPS Fallback: ${site.domain} — all nodes offline
+${site.domain} {
+    # Serve fallback page from VPS
+    root * ${fallbackPath}
+    file_server
+    
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+    
+    log {
+        output file ${CADDY_DATA_DIR.replace(/\\/g, '/')}/logs/${site.domain}-fallback.log
+    }
+}
+
+http://${site.domain} {
+    redir https://{host.port}{uri} permanent
+}
+
+`;
+    } else {
+      caddyfile += `# VPS Fallback: ${site.domain}
+${site.domain} {
+    root * ${fallbackPath}
+    file_server
 }
 
 `;
@@ -423,10 +490,12 @@ async function reloadCaddy() {
   if (!proxyEnabled || !caddyProcess) return false;
 
   try {
-    // Caddy reloads config automatically when the file changes
-    // But we can also send SIGHUP or use the API
-    // For now, we rely on Caddy's file watching (enabled by default)
-    logger.debug('Caddy configuration updated — Caddy auto-reloads on file change');
+    const { execSync } = require('child_process');
+    execSync(`caddy reload --config "${CADDYFILE_PATH}"`, {
+      stdio: 'pipe',
+      timeout: 10000,
+    });
+    logger.info('Caddy configuration reloaded successfully');
     return true;
   } catch (error) {
     logger.warn(`Caddy reload error: ${error.message}`);

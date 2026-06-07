@@ -23,6 +23,19 @@ function scoreNodeForDeployment(node, deployType) {
   if (!node || node.status !== 'online') return 0;
   if (node.mode === 'OFFLINE') return 0;
   if (node.type === 'DISABLED') return 0;
+  // Nodes in GAMING or maintenance mode should not receive new deployments
+  if (node.mode === 'GAMING') return 0;
+  if (node.type === 'DISABLED') return 0;
+
+  // Check runtime capabilities for deployment type
+  const caps = node.capabilities || {};
+  if (deployType === 'static' && !caps.staticHostingSupported) return 0;
+  if (deployType === 'python' && !caps.pythonHostingSupported && !caps.dockerHostingSupported) return 0;
+  if (deployType === 'nodejs' && !caps.nodejsHostingSupported && !caps.dockerHostingSupported) return 0;
+  if (deployType === 'docker' && !caps.dockerHostingSupported) return 0;
+
+  // Nodes without Tailscale endpoint should not receive production traffic
+  if (!caps.tailscaleOnline && !node.tunnelEndpoint && deployType !== 'compute') return 0;
 
   let score = 0;
 
@@ -68,31 +81,28 @@ function scoreNodeForDeployment(node, deployType) {
  * Find the best node for a deployment.
  * Returns the node document or null if none available.
  *
- * @param {string} deployType - Type of deployment (static, nodejs, python, docker, custom)
- * @param {string} excludeNodeId - Optional nodeId to exclude (for failover)
+ * @param {string} deployType - Type of deployment
+ * @param {string|string[]} excludeNodeIds - NodeId or array of nodeIds to exclude
  */
-async function findBestNode(deployType, excludeNodeId = null) {
-  // Get all online nodes (any mode except OFFLINE/DISABLED)
-  // GAMING mode is accepted as fallback when no IDLE/NORMAL nodes exist
+async function findBestNode(deployType, excludeNodeIds = []) {
+  const excludes = Array.isArray(excludeNodeIds) ? excludeNodeIds : [excludeNodeIds].filter(Boolean);
+
   let query = {
     status: 'online',
-    mode: { $in: ['IDLE', 'NORMAL', 'GAMING'] },
+    mode: { $in: ['IDLE', 'NORMAL'] },
     type: { $ne: 'DISABLED' },
   };
 
-  if (excludeNodeId) {
-    query.nodeId = { $ne: excludeNodeId };
+  if (excludes.length > 0) {
+    query.nodeId = { $nin: excludes };
   }
 
   let candidates = await Node.find(query).lean();
 
-  // If no candidates including GAMING, try without GAMING restriction
   if (candidates.length === 0) {
-    query = {
-      status: 'online',
-      type: { $ne: 'DISABLED' },
-    };
-    if (excludeNodeId) query.nodeId = { $ne: excludeNodeId };
+    // Fallback: try anything online that isn't disabled
+    query = { status: 'online', mode: { $ne: 'OFFLINE' }, type: { $ne: 'DISABLED' } };
+    if (excludes.length > 0) query.nodeId = { $nin: excludes };
     candidates = await Node.find(query).lean();
     if (candidates.length > 0) {
       logger.warn('No IDLE/NORMAL/GAMING nodes found, using any online node as fallback');
@@ -134,7 +144,7 @@ async function findBestNodes(deployType, count = 2) {
   const excludeIds = [];
 
   for (let i = 0; i < count; i++) {
-    const node = await findBestNode(deployType, excludeIds.length > 0 ? excludeIds[0] : null);
+    const node = await findBestNode(deployType, excludeIds);
     if (!node) break;
     nodes.push(node);
     excludeIds.push(node.nodeId);

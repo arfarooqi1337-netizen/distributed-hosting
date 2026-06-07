@@ -69,7 +69,7 @@ function sanitizeHeartbeatMetrics(metrics) {
  * @param {Object} io - Socket.IO instance for real-time updates
  */
 async function processHeartbeat(node, heartbeatData, io) {
-  const { mode, timestamp } = heartbeatData;
+  const { mode, timestamp, capabilities } = heartbeatData;
   const previousMode = node.mode;
   const previousStatus = node.status;
 
@@ -100,6 +100,41 @@ async function processHeartbeat(node, heartbeatData, io) {
   } else {
     updateFields.activeGame = false;
     // Don't clear game processes immediately; let them decay
+  }
+
+  // Process runtime capabilities (if provided)
+  if (capabilities && typeof capabilities === 'object') {
+    const capFields = {};
+    const capMap = {
+      tailscaleOnline: 'capabilities.tailscaleOnline',
+      tailscaleIp: 'capabilities.tailscaleIp',
+      dockerInstalled: 'capabilities.dockerInstalled',
+      dockerRunning: 'capabilities.dockerRunning',
+      dockerVersion: 'capabilities.dockerVersion',
+      wslEnabled: 'capabilities.wslEnabled',
+      agentServiceInstalled: 'capabilities.agentServiceInstalled',
+      agentServiceRunning: 'capabilities.agentServiceRunning',
+      autoStartEnabled: 'capabilities.autoStartEnabled',
+      staticHostingSupported: 'capabilities.staticHostingSupported',
+      dockerHostingSupported: 'capabilities.dockerHostingSupported',
+      pythonHostingSupported: 'capabilities.pythonHostingSupported',
+      nodejsHostingSupported: 'capabilities.nodejsHostingSupported',
+    };
+    for (const [key, field] of Object.entries(capMap)) {
+      if (capabilities[key] !== undefined) {
+        capFields[field] = capabilities[key];
+      }
+    }
+    capFields['capabilities.lastRuntimeCheck'] = new Date();
+    if (Object.keys(capFields).length > 0) {
+      Object.assign(updateFields, capFields);
+    }
+
+    // Also update tunnel type/endpoint from Tailscale info
+    if (capabilities.tailscaleIp) {
+      updateFields.tunnelEndpoint = `ts:${capabilities.tailscaleIp}`;
+      updateFields.tunnelType = 'tailscale';
+    }
   }
 
   // Update node in database

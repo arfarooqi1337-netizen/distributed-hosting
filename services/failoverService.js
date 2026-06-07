@@ -89,14 +89,37 @@ async function evaluateSiteHealth(site, io) {
   }
 
   if (!targetNode) {
-    logger.warn(`No failover target for ${site.domain} — all nodes exhausted`);
-    await createFailoverAlert(site, failoverReason, 'no_target', io);
+    logger.warn(`No failover target for ${site.domain} — routing to VPS fallback`);
+    // Set website to VPS fallback mode — Caddy will route to a local maintenance page
+    await Website.updateOne(
+      { siteId: site.siteId },
+      {
+        $set: {
+          activeNode: null,
+          healthStatus: 'down',
+        },
+        $inc: { failoverCount: 1 },
+        $push: {
+          failoverHistory: {
+            from: activeNode._id,
+            to: null,
+            reason: failoverReason + ' — VPS fallback activated',
+            timestamp: new Date(),
+          },
+        },
+      }
+    );
+    await createFailoverAlert(site, failoverReason, 'vps_fallback', io);
+    // Update proxy to serve fallback page
+    proxyService.generateCaddyfile().catch(() => {});
+    proxyService.reloadCaddy().catch(() => {});
     return;
   }
 
-  // Check if target node is healthy
+  // Check if target node is healthy — must be actively serving, not gaming
   const isTargetHealthy = targetNode.status === 'online' &&
     targetNode.mode !== 'OFFLINE' &&
+    targetNode.mode !== 'GAMING' &&
     (targetNode.metrics?.cpuPercent || 0) < 80;
 
   if (!isTargetHealthy) {

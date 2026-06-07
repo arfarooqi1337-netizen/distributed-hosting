@@ -373,8 +373,13 @@ router.get('/:id/download', authenticateNode, async (req, res, next) => {
       return res.status(404).json({ error: 'Deployment not found' });
     }
 
-    // Verify this node is the assigned node
-    if (deployment.assignedNodeId && deployment.assignedNodeId !== req.node.nodeId) {
+    // Verify this node is authorized to download (primary, secondary, or backup)
+    const allowedNodeIds = [
+      deployment.assignedNodeId,
+      ...(deployment.nodeResults || []).map(n => n.nodeId),
+    ].filter(Boolean);
+    
+    if (allowedNodeIds.length > 0 && !allowedNodeIds.includes(req.node.nodeId)) {
       return res.status(403).json({ error: 'This deployment is not assigned to your node' });
     }
 
@@ -513,7 +518,7 @@ router.post('/report', authenticateNode, async (req, res, next) => {
 
     const updated = await deploymentService.handleDeploymentReport(deploymentId, {
       status, progress, message, containerId, containerName, port,
-    });
+    }, req.node.nodeId);
 
     // Emit to admin panel
     const io = req.app.get('io');

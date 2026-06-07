@@ -158,6 +158,23 @@ const nodeSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Runtime capabilities (reported by agent on each heartbeat)
+    capabilities: {
+      tailscaleOnline: { type: Boolean, default: false },
+      tailscaleIp: { type: String, default: '' },
+      dockerInstalled: { type: Boolean, default: false },
+      dockerRunning: { type: Boolean, default: false },
+      dockerVersion: { type: String, default: '' },
+      wslEnabled: { type: Boolean, default: false },
+      agentServiceInstalled: { type: Boolean, default: false },
+      agentServiceRunning: { type: Boolean, default: false },
+      autoStartEnabled: { type: Boolean, default: false },
+      staticHostingSupported: { type: Boolean, default: false },
+      dockerHostingSupported: { type: Boolean, default: false },
+      pythonHostingSupported: { type: Boolean, default: false },
+      nodejsHostingSupported: { type: Boolean, default: false },
+      lastRuntimeCheck: { type: Date, default: null },
+    },
   },
   {
     timestamps: true,

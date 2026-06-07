@@ -88,16 +88,12 @@ router.post('/:nodeId/action', authenticateAdmin, auditMiddleware, async (req, r
         command: commandName,
         params: { container_id: containerId || '' },
       });
+      // Also notify admin panel of the action
+      io.to('admin').emit('container:action', { nodeId: req.params.nodeId, action, containerId, deploymentId, commandId });
     }
 
     logger.info(`Container action dispatched: ${action} on node ${req.params.nodeId}`);
     await res.auditLog('container_action', 'node', req.params.nodeId, { action, containerId, deploymentId });
-
-    // Notify admin panel
-    const io = req.app.get('io');
-    if (io) {
-      io.to('admin').emit('container:action', { nodeId: req.params.nodeId, action, containerId, deploymentId, commandId });
-    }
 
     res.json({ success: true, message: `Action '${action}' dispatched to node`, commandId });
   } catch (error) {

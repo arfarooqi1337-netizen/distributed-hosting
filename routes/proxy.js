@@ -40,6 +40,12 @@ router.post('/reload', authenticateAdmin, async (req, res, next) => {
   try {
     await proxyService.generateCaddyfile();
     await proxyService.reloadCaddy();
+    
+    const io = req.app.get('io');
+    if (io) {
+      io.to('admin').emit('proxy:update', { message: 'Proxy configuration reloaded', timestamp: new Date() });
+    }
+    
     res.json({
       success: true,
       message: 'Proxy configuration reloaded',

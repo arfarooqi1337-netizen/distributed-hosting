@@ -18,6 +18,7 @@ const Node = require('../models/Node');
 const NodeHistory = require('../models/NodeHistory');
 const Command = require('../models/Command');
 const config = require('../config');
+const deploymentService = require('../services/deploymentService');
 const { authenticateNode, authenticateAdmin } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const { validateNodeRegistration, validateHeartbeat } = require('../middleware/validation');
@@ -308,6 +309,26 @@ router.post('/commands/ack', authenticateNode, async (req, res, next) => {
 
     if (!command) {
       return res.status(404).json({ error: 'Command not found for this node' });
+    }
+
+    // If the acknowledged command is a deployment, auto-trigger report
+    if (command.command === 'deploy_site' && command.params?.deploymentId && result) {
+      try {
+        await deploymentService.handleDeploymentReport(
+          command.params.deploymentId,
+          {
+            status: result.status || 'active',
+            message: result.message || '',
+            containerId: result.container_id || result.containerId,
+            containerName: result.container_name || result.containerName,
+            port: result.port,
+            progress: result.progress,
+          },
+          req.node.nodeId
+        );
+      } catch (reportErr) {
+        logger.error(`Auto deployment report failed for ${command.params.deploymentId}: ${reportErr.message}`);
+      }
     }
 
     res.json({ success: true, command });

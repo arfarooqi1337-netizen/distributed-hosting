@@ -18,8 +18,12 @@
  * For local development, all nodes are "direct" on localhost.
  */
 
+const path = require('path');
 const Node = require('../models/Node');
 const logger = require('../config/logger');
+
+// Check dev mode without circular dependency
+const isDev = (process.env.NODE_ENV || 'development') === 'development';
 
 /**
  * Update a node's tunnel endpoint information.
@@ -58,9 +62,13 @@ async function getNodeAddress(nodeId, port) {
   const node = await Node.findOne({ nodeId }).lean();
   if (!node) return null;
 
-  // If no tunnel, use the node's IP or localhost
+  // If no tunnel, use localhost for dev, null for production
+  // In production, nodes MUST have a tunnel endpoint configured
   if (!node.tunnelEndpoint) {
-    return `localhost:${port}`;
+    if (isDev) {
+      return `localhost:${port}`;
+    }
+    return null;
   }
 
   const endpoint = node.tunnelEndpoint;

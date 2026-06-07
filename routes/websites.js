@@ -33,6 +33,9 @@ router.get('/', authenticateAdmin, async (req, res, next) => {
     const websites = await Website.find(filter)
       .populate('assignedNodes', 'nodeId name status mode metrics.cpuPercent metrics.ramPercent score')
       .populate('primaryNode', 'nodeId name status score')
+      .populate('secondaryNode', 'nodeId name status score')
+      .populate('fallbackNode', 'nodeId name status score')
+      .populate('activeNode', 'nodeId name status score tailscaleIP ipAddress')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -103,6 +106,9 @@ router.get('/:siteId', authenticateAdmin, async (req, res, next) => {
     const website = await Website.findOne({ siteId: req.params.siteId })
       .populate('assignedNodes', 'nodeId name status mode metrics score')
       .populate('primaryNode', 'nodeId name status score')
+      .populate('secondaryNode', 'nodeId name status score')
+      .populate('fallbackNode', 'nodeId name status score')
+      .populate('activeNode', 'nodeId name status score tailscaleIP ipAddress')
       .lean();
 
     if (!website) {
