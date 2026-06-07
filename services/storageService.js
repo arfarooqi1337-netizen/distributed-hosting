@@ -131,4 +131,47 @@ function getArtifactInfo(deployment) {
   return { filename: deployment.source?.filename || 'artifact.zip', filePath: deployment.filePath || '', size: deployment.source?.size || 0, checksum: deployment.source?.checksum || '', storageType: 'local', storageNodeId: '' };
 }
 
-module.exports = { saveUploadedFile: saveUploadedFile, getArtifactPath: getArtifactPath, getArtifactInfo: getArtifactInfo, getStorageDriver: getStorageDriver, calculateChecksum: calculateChecksum };
+/**
+ * Extract a deployed artifact zip for preview.
+ * Non-critical — failures are logged but not thrown.
+ */
+async function extractArchive(deploymentId, zipPath) {
+  try {
+    var AdmZip = require('adm-zip');
+    var extractDir = path.join(DEPLOYMENTS_DIR, deploymentId, 'extracted');
+    if (fs.existsSync(extractDir)) return;
+    fs.mkdirSync(extractDir, { recursive: true });
+    var zip = new AdmZip(zipPath);
+    zip.extractAllTo(extractDir, true);
+    logger.debug('Extracted ' + deploymentId + ' to ' + extractDir);
+  } catch (err) {
+    logger.warn('Extraction skipped for ' + deploymentId + ': ' + err.message);
+  }
+}
+
+/**
+ * Get the extracted file tree for a deployment.
+ */
+function getExtractedTree(deploymentId) {
+  var extractDir = path.join(DEPLOYMENTS_DIR, deploymentId, 'extracted');
+  if (!fs.existsSync(extractDir)) return [];
+  var result = [];
+  function walk(dir, prefix) {
+    var entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (var e of entries) {
+      var fullPath = path.join(dir, e.name);
+      var relPath = prefix ? prefix + '/' + e.name : e.name;
+      if (e.isDirectory()) {
+        result.push({ name: relPath + '/', type: 'directory' });
+        walk(fullPath, relPath);
+      } else {
+        var stat = fs.statSync(fullPath);
+        result.push({ name: relPath, type: 'file', size: stat.size });
+      }
+    }
+  }
+  walk(extractDir, '');
+  return result;
+}
+
+module.exports = { saveUploadedFile: saveUploadedFile, getArtifactPath: getArtifactPath, getArtifactInfo: getArtifactInfo, getStorageDriver: getStorageDriver, calculateChecksum: calculateChecksum, extractArchive: extractArchive, getExtractedTree: getExtractedTree };
