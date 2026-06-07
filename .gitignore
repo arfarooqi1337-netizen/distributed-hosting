@@ -1,0 +1,42 @@
+﻿# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+agent/node_modules/
+
+# Environment files
+.env
+.env.*
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+agent/.env
+agent/.env.*
+
+# Build files
+dist/
+build/
+frontend/dist/
+frontend/build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+*.zip
+
+# Private keys
+*.pem
+*.ppk
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
