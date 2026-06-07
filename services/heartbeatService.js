@@ -105,33 +105,32 @@ async function processHeartbeat(node, heartbeatData, io) {
 
   // Process runtime capabilities (if provided)
   if (capabilities && typeof capabilities === 'object') {
-    const capFields = {};
+    // Build a complete capabilities object from heartbeat data + merge with existing
+    const newCaps = { ...(node.capabilities || {}) };
     const capMap = {
-      tailscaleOnline: 'capabilities.tailscaleOnline',
-      tailscaleIp: 'capabilities.tailscaleIp',
-      dockerInstalled: 'capabilities.dockerInstalled',
-      dockerDaemonRunning: 'capabilities.dockerDaemonRunning',
-      dockerCliWorking: 'capabilities.dockerCliWorking',
-      dockerInfoOk: 'capabilities.dockerInfoOk',
-      dockerVersion: 'capabilities.dockerVersion',
-      dockerHostingSupported: 'capabilities.dockerHostingSupported',
-      wslEnabled: 'capabilities.wslEnabled',
-      agentServiceInstalled: 'capabilities.agentServiceInstalled',
-      agentServiceRunning: 'capabilities.agentServiceRunning',
-      autoStartEnabled: 'capabilities.autoStartEnabled',
-      staticHostingSupported: 'capabilities.staticHostingSupported',
-      pythonHostingSupported: 'capabilities.pythonHostingSupported',
-      nodejsHostingSupported: 'capabilities.nodejsHostingSupported',
+      tailscaleOnline: 'tailscaleOnline',
+      tailscaleIp: 'tailscaleIp',
+      dockerInstalled: 'dockerInstalled',
+      dockerDaemonRunning: 'dockerDaemonRunning',
+      dockerCliWorking: 'dockerCliWorking',
+      dockerInfoOk: 'dockerInfoOk',
+      dockerVersion: 'dockerVersion',
+      dockerHostingSupported: 'dockerHostingSupported',
+      wslEnabled: 'wslEnabled',
+      agentServiceInstalled: 'agentServiceInstalled',
+      agentServiceRunning: 'agentServiceRunning',
+      autoStartEnabled: 'autoStartEnabled',
+      staticHostingSupported: 'staticHostingSupported',
+      pythonHostingSupported: 'pythonHostingSupported',
+      nodejsHostingSupported: 'nodejsHostingSupported',
     };
     for (const [key, field] of Object.entries(capMap)) {
       if (capabilities[key] !== undefined) {
-        capFields[field] = capabilities[key];
+        newCaps[field] = capabilities[key];
       }
     }
-    capFields['capabilities.lastRuntimeCheck'] = new Date();
-    if (Object.keys(capFields).length > 0) {
-      Object.assign(updateFields, capFields);
-    }
+    newCaps.lastRuntimeCheck = new Date();
+    updateFields.capabilities = newCaps;
 
     // Also update tunnel type/endpoint from Tailscale info
     if (capabilities.tailscaleIp) {
