@@ -58,13 +58,16 @@ function scoreNodeForDeployment(node, deployType) {
   if (deployType === 'static' || deployType === 'nodejs' || deployType === 'custom') {
     // Website hosting — needs good bandwidth, low latency
     if (node.type === 'TRAFFIC_NODE') score += 30;
+    else if (node.type === 'BACKUP_NODE') score += 5;  // Low priority
     score += (node.trafficScore || 0) * 0.3;
   } else if (deployType === 'docker') {
-    // Docker — needs Docker enabled (future check)
-    if (node.type === 'TRAFFIC_NODE' || node.type === 'COMPUTE_NODE') score += 20;
+    // Docker — needs Docker enabled
+    if (node.type === 'TRAFFIC_NODE') score += 20;
+    else if (node.type === 'BACKUP_NODE') score += 5;  // Low priority
     score += (node.computeScore || 0) * 0.3;
   } else {
     // Default
+    if (node.type === 'BACKUP_NODE') score -= 15;  // Penalty for backup
     score += (node.score || 0) * 0.3;
   }
 

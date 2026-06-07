@@ -63,6 +63,7 @@ async function evaluateSiteHealth(site, io) {
   if (isNodeHealthy) return; // Everything is fine
 
   // Determine which node to fail over to
+  // Priority: TRAFFIC_NODE/COMPUTE_NODE > BACKUP_NODE > VPS fallback
   let targetNode = null;
   let failoverReason = '';
 
@@ -76,16 +77,37 @@ async function evaluateSiteHealth(site, io) {
     failoverReason = `Node ${activeNode.name} is unhealthy`;
   }
 
-  // Find the next node in the chain
-  const primaryId = site.primaryNode?._id?.toString();
-  const secondaryId = site.secondaryNode?._id?.toString();
-  const fallbackId = site.fallbackNode?._id?.toString();
-  const activeId = activeNode._id?.toString();
+  // Collect candidate nodes from the website's assigned nodes
+  const candidateIds = [
+    site.secondaryNode?._id,
+    site.fallbackNode?._id,
+    ...(site.assignedNodes || []).map(n => n._id).filter(id => {
+      const idStr = id.toString();
+      return idStr !== site.primaryNode?._id?.toString() &&
+             idStr !== site.secondaryNode?._id?.toString() &&
+             idStr !== site.fallbackNode?._id?.toString();
+    }),
+  ].filter(Boolean);
 
-  if (activeId === primaryId && secondaryId) {
-    targetNode = site.secondaryNode;
-  } else if ((activeId === primaryId || activeId === secondaryId) && fallbackId) {
-    targetNode = site.fallbackNode;
+  // Remove duplicates and the current active node
+  const uniqueIds = [...new Set(candidateIds.map(id => id.toString()))]
+    .filter(id => id !== activeNode._id?.toString());
+
+  if (uniqueIds.length > 0) {
+    // Find the best healthy node — prefer TRAFFIC_NODE over BACKUP_NODE
+    const candidates = await Node.find({
+      _id: { $in: uniqueIds.map(id => require('mongoose').Types.ObjectId(id)) },
+      status: 'online',
+      mode: { $nin: ['OFFLINE', 'GAMING'] },
+    })
+      .sort({ type: 1, score: -1 }) // TRAFFIC_NODE first (alphabetically), then by score
+      .lean();
+
+    // Pick the best candidate: prefer non-BACKUP_NODE types
+    const bestCandidate = candidates.find(n => n.type !== 'BACKUP_NODE') || candidates[0];
+    if (bestCandidate) {
+      targetNode = bestCandidate;
+    }
   }
 
   if (!targetNode) {
