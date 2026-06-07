@@ -176,8 +176,17 @@ router.post(
             'source.filename': fileInfo.filename,
             'source.size': fileInfo.size,
             status: 'processing',
-          },
-        }
+          },          $push: {
+            artifacts: {
+              filename: fileInfo.filename,
+              filePath: fileInfo.filePath,
+              size: fileInfo.size,
+              checksum: fileInfo.checksum,
+              storageType: fileInfo.storageType,
+              storageNodeId: fileInfo.storageNodeId,
+              uploadedAt: new Date(),
+            },
+          },        }
       );
 
       // Extract archive for preview (non-blocking)
@@ -383,9 +392,12 @@ router.get('/:id/download', authenticateNode, async (req, res, next) => {
       return res.status(403).json({ error: 'This deployment is not assigned to your node' });
     }
 
-    const filePath = deployment.source?.filePath;
-    if (!filePath || !fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Deployment file not found on server' });
+    const artifactInfo = storageService.getArtifactInfo(deployment);
+    let filePath;
+    try {
+      filePath = await storageService.getArtifactPath(deployment.deploymentId, artifactInfo);
+    } catch (err) {
+      return res.status(404).json({ error: 'Deployment file not found: ' + err.message });
     }
 
     // Update deployment status
@@ -394,7 +406,7 @@ router.get('/:id/download', authenticateNode, async (req, res, next) => {
       { $set: { status: 'downloading', progress: 25 } }
     );
 
-    const filename = deployment.source.filename || 'artifact.zip';
+    const filename = artifactInfo.filename || 'artifact.zip';
     res.download(filePath, filename);
   } catch (error) {
     next(error);

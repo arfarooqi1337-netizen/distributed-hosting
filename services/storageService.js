@@ -1,196 +1,134 @@
 /**
  * Storage service
  *
- * Manages deployment artifact storage on the local filesystem.
- * Handles file uploads, extraction, integrity verification,
- * and cleanup of old deployment artifacts.
+ * Manages deployment artifact storage with pluggable backends:
+ *   - local:        Save artifacts to the controller's local filesystem
+ *   - backup_node:  Save artifacts to the Backup VPS file server
  *
- * All deployment files are stored under: <project_root>/deployments/<deploymentId>/
+ * Config via environment variables:
+ *   ARTIFACT_STORAGE_DRIVER=local|backup_node
+ *   ARTIFACT_BACKUP_NODE_ID=<backup-node-id>
+ *   ARTIFACT_BACKUP_URL=http://<tailscale-ip>:9000
+ *   ARTIFACT_STORAGE_PATH=/var/omega/artifacts
+ *   ARTIFACT_API_KEY=<shared-secret-for-storage-server>
  */
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { pipeline } = require('stream/promises');
-const { createWriteStream, createReadStream } = require('fs');
+const http = require('http');
 const logger = require('../config/logger');
 
 const DEPLOYMENTS_DIR = path.join(__dirname, '..', 'deployments');
 
-/**
- * Ensure the deployments directory exists.
- */
-function ensureDeployDir(deploymentId) {
+const STORAGE_DRIVER = process.env.ARTIFACT_STORAGE_DRIVER || 'local';
+const BACKUP_NODE_URL = process.env.ARTIFACT_BACKUP_URL || '';
+const BACKUP_API_KEY = process.env.ARTIFACT_API_KEY || '';
+
+function getStorageDriver() {
+  return STORAGE_DRIVER;
+}
+
+function ensureLocalDir(deploymentId) {
   const dir = path.join(DEPLOYMENTS_DIR, deploymentId);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-/**
- * Get the filesystem path for a deployment's artifact directory.
- */
-function getDeployDir(deploymentId) {
-  return path.join(DEPLOYMENTS_DIR, deploymentId);
+async function calculateChecksum(data) {
+  if (typeof data === 'string') {
+    return new Promise(function(resolve, reject) {
+      var hash = crypto.createHash('sha256');
+      var stream = fs.createReadStream(data);
+      stream.on('data', function(chunk) { hash.update(chunk); });
+      stream.on('end', function() { resolve(hash.digest('hex')); });
+      stream.on('error', reject);
+    });
+  }
+  return crypto.createHash('sha256').update(data).digest('hex');
 }
 
-/**
- * Calculate SHA-256 checksum of a file.
- */
-async function calculateChecksum(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = createReadStream(filePath);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
+function backupNodeRequest(method, urlPath, bodyBuffer) {
+  return new Promise(function(resolve, reject) {
+    if (!BACKUP_NODE_URL) return reject(new Error('ARTIFACT_BACKUP_URL not configured'));
+    var url = new URL(BACKUP_NODE_URL + urlPath);
+    var options = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: method,
+      headers: { 'Authorization': 'Bearer ' + BACKUP_API_KEY, 'Content-Type': 'application/octet-stream' },
+      timeout: 30000,
+    };
+    if (bodyBuffer) options.headers['Content-Length'] = bodyBuffer.length;
+    var req = http.request(options, function(res) {
+      var chunks = [];
+      res.on('data', function(c) { chunks.push(c); });
+      res.on('end', function() {
+        var body = Buffer.concat(chunks).toString('utf-8');
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch (e) { resolve(body); }
+        } else {
+          reject(new Error('Backup storage error ' + res.statusCode + ': ' + body.slice(0, 200)));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', function() { req.destroy(); reject(new Error('Backup storage timeout')); });
+    if (bodyBuffer) req.write(bodyBuffer);
+    req.end();
   });
 }
 
-/**
- * Save an uploaded file to the deployment directory.
- * Returns { filePath, filename, size, checksum }
- */
 async function saveUploadedFile(deploymentId, uploadedFile) {
-  const dir = ensureDeployDir(deploymentId);
-  const filename = uploadedFile.originalname || 'artifact.zip';
-  const filePath = path.join(dir, filename);
+  var buffer = uploadedFile.buffer || (uploadedFile.path ? fs.readFileSync(uploadedFile.path) : null);
+  if (!buffer) throw new Error('No file data provided');
+  var filename = uploadedFile.originalname || 'artifact.zip';
+  var checksum = await calculateChecksum(buffer);
+  var size = buffer.length;
 
-  // Write the file
-  if (uploadedFile.buffer) {
-    fs.writeFileSync(filePath, uploadedFile.buffer);
-  } else if (uploadedFile.path) {
-    fs.copyFileSync(uploadedFile.path, filePath);
-  } else {
-    throw new Error('No file data provided');
+  if (STORAGE_DRIVER === 'backup_node') {
+    logger.info('Saving artifact to backup node: ' + deploymentId + '/' + filename + ' (' + size + ' bytes)');
+    await backupNodeRequest('PUT', '/artifacts/' + deploymentId + '/' + filename, buffer);
+    var storageNodeId = process.env.ARTIFACT_BACKUP_NODE_ID || '';
+    return { filePath: '/var/omega/artifacts/' + deploymentId + '/' + filename, filename: filename, size: size, checksum: checksum, storageType: 'backup_node', storageNodeId: storageNodeId };
   }
 
-  const stats = fs.statSync(filePath);
-  const checksum = await calculateChecksum(filePath);
-
-  logger.debug(`Saved deployment file: ${filename} (${stats.size} bytes, sha256: ${checksum.slice(0, 16)}...)`);
-
-  return {
-    filePath,
-    filename,
-    size: stats.size,
-    checksum,
-  };
+  var dir = ensureLocalDir(deploymentId);
+  var filePath = path.join(dir, filename);
+  fs.writeFileSync(filePath, buffer);
+  return { filePath: filePath, filename: filename, size: size, checksum: checksum, storageType: 'local', storageNodeId: '' };
 }
 
-/**
- * Extract a zip archive into the deployment directory.
- * Returns the extraction path.
- */
-async function extractArchive(deploymentId, filePath) {
-  const dir = getDeployDir(deploymentId);
-  const extractDir = path.join(dir, 'extracted');
+async function getArtifactPath(deploymentId, artifactInfo) {
+  var st = artifactInfo.storageType || 'local';
+  var fn = artifactInfo.filename || 'artifact.zip';
 
-  try {
-    const AdmZip = require('adm-zip');
-    const zip = new AdmZip(filePath);
-    zip.extractAllTo(extractDir, true);
-    logger.debug(`Extracted ${filePath} to ${extractDir}`);
-  } catch (error) {
-    logger.warn(`Failed to extract with adm-zip, trying unzipper: ${error.message}`);
-    // Fallback: create dir and list contents
-    fs.mkdirSync(extractDir, { recursive: true });
-    // Try unzipper as fallback
-    try {
-      const unzipper = require('unzipper');
-      await pipeline(
-        createReadStream(filePath),
-        unzipper.Extract({ path: extractDir })
-      );
-    } catch (err2) {
-      logger.error(`Extraction failed: ${err2.message}`);
-      throw new Error(`Failed to extract archive: ${err2.message}`);
-    }
+  if (st === 'backup_node') {
+    var localDir = ensureLocalDir(deploymentId);
+    var localPath = path.join(localDir, fn);
+    if (fs.existsSync(localPath)) return localPath;
+    // Download from backup VPS
+    var url = new URL(BACKUP_NODE_URL + '/artifacts/' + deploymentId + '/' + fn);
+    return new Promise(function(resolve, reject) {
+      var destStream = fs.createWriteStream(localPath);
+      http.get(url, { headers: { 'Authorization': 'Bearer ' + BACKUP_API_KEY } }, function(res) {
+        if (res.statusCode !== 200) { reject(new Error('Download failed: ' + res.statusCode)); return; }
+        res.pipe(destStream);
+        res.on('end', function() { resolve(localPath); });
+        res.on('error', reject);
+      }).on('error', reject);
+    });
   }
 
-  return extractDir;
+  var localPath = artifactInfo.filePath || path.join(DEPLOYMENTS_DIR, deploymentId, fn);
+  if (!fs.existsSync(localPath)) throw new Error('Artifact not found: ' + localPath);
+  return localPath;
 }
 
-/**
- * Get the contents of the extracted directory (file tree).
- */
-function getExtractedTree(deploymentId) {
-  const extractDir = path.join(getDeployDir(deploymentId), 'extracted');
-  if (!fs.existsSync(extractDir)) return [];
-
-  function walk(dir, relativePath = '') {
-    const entries = [];
-    const items = fs.readdirSync(dir, { withFileTypes: true });
-    for (const item of items) {
-      const fullPath = path.join(dir, item.name);
-      const relPath = relativePath ? `${relativePath}/${item.name}` : item.name;
-      if (item.isDirectory()) {
-        entries.push({ name: item.name, path: relPath, type: 'directory', children: walk(fullPath, relPath) });
-      } else {
-        const stat = fs.statSync(fullPath);
-        entries.push({ name: item.name, path: relPath, type: 'file', size: stat.size });
-      }
-    }
-    return entries;
-  }
-
-  return walk(extractDir);
+function getArtifactInfo(deployment) {
+  if (deployment.artifacts && deployment.artifacts.length > 0) return deployment.artifacts[0];
+  return { filename: deployment.source?.filename || 'artifact.zip', filePath: deployment.filePath || '', size: deployment.source?.size || 0, checksum: deployment.source?.checksum || '', storageType: 'local', storageNodeId: '' };
 }
 
-/**
- * Read a file from an extracted deployment (for preview/serving).
- */
-function readExtractedFile(deploymentId, relativePath) {
-  const filePath = path.join(getDeployDir(deploymentId), 'extracted', relativePath);
-  // Security: prevent path traversal
-  const resolved = path.resolve(filePath);
-  const baseDir = path.resolve(path.join(getDeployDir(deploymentId), 'extracted'));
-  if (!resolved.startsWith(baseDir)) {
-    throw new Error('Invalid path');
-  }
-  if (!fs.existsSync(resolved)) return null;
-  return fs.readFileSync(resolved);
-}
-
-/**
- * Clean up all files for a deployment.
- */
-function cleanupDeployment(deploymentId) {
-  const dir = getDeployDir(deploymentId);
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-    logger.debug(`Cleaned up deployment files: ${deploymentId}`);
-  }
-}
-
-/**
- * Get the total disk usage of the deployments directory in bytes.
- */
-function getDeploymentsDiskUsage() {
-  if (!fs.existsSync(DEPLOYMENTS_DIR)) return 0;
-
-  let totalSize = 0;
-  function walkDir(dir) {
-    const items = fs.readdirSync(dir, { withFileTypes: true });
-    for (const item of items) {
-      const fullPath = path.join(dir, item.name);
-      if (item.isDirectory()) {
-        walkDir(fullPath);
-      } else {
-        totalSize += fs.statSync(fullPath).size;
-      }
-    }
-  }
-
-  walkDir(DEPLOYMENTS_DIR);
-  return totalSize;
-}
-
-module.exports = {
-  saveUploadedFile,
-  extractArchive,
-  getExtractedTree,
-  readExtractedFile,
-  cleanupDeployment,
-  getDeploymentsDiskUsage,
-  getDeployDir,
-};
+module.exports = { saveUploadedFile: saveUploadedFile, getArtifactPath: getArtifactPath, getArtifactInfo: getArtifactInfo, getStorageDriver: getStorageDriver, calculateChecksum: calculateChecksum };

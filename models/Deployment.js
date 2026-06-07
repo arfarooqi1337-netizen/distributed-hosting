@@ -135,7 +135,8 @@ const deploymentSchema = new mongoose.Schema(
       filePath: String,
       size: Number,
       checksum: String,
-      storageType: { type: String, enum: ['local', 's3', 'r2'], default: 'local' },
+      storageType: { type: String, enum: ['local', 'backup_node', 's3', 'r2'], default: 'local' },
+      storageNodeId: { type: String, default: '' },
       uploadedAt: { type: Date, default: Date.now },
     }],
     // Multi-node deployment tracking
