@@ -273,7 +273,9 @@ async function generateCaddyfile() {
 
   // Add active site routes
   for (const entry of entries) {
-    const target = entry.targetAddress || `localhost:${entry.port}`;
+    const rawTarget = entry.targetAddress || `localhost:${entry.port}`;
+    // Strip tunnel type prefixes (ts:, wg:, direct:, zt:) — Caddy doesn't understand them
+    const target = rawTarget.replace(/^(ts|wg|direct|zt):/, '');
     const siteId = entry.siteId || 'unknown';
     const nodeName = entry.nodeName || 'unknown';
     const isPublicDomain = entry.domain !== 'localhost' &&
