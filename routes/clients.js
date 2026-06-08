@@ -198,13 +198,17 @@ router.get('/:clientId', authenticateAdmin, async (req, res, next) => {
  */
 router.patch('/:clientId', authenticateAdmin, auditMiddleware, async (req, res, next) => {
   try {
-    const { name, company, plan, status, notes } = req.body;
+    const { name, company, plan, status, notes, password } = req.body;
     const update = {};
     if (name) update.name = name;
     if (company !== undefined) update.company = company;
     if (plan) update.plan = plan;
     if (status) update.status = status;
     if (notes !== undefined) update.notes = notes;
+    if (password) {
+      const salt = await bcrypt.genSalt(12);
+      update.password = await bcrypt.hash(password, salt);
+    }
 
     const client = await Client.findOneAndUpdate(
       { clientId: req.params.clientId },
