@@ -88,6 +88,19 @@ async function rebuildRoutingTable() {
     const port = dep.containerInfo?.exposedPort || 0;
     if (!port) continue;
 
+    // Resolve target address from node's tailscale IP
+    let targetAddress = null;
+    try {
+      const nodeDoc = await Node.findOne({ nodeId: node.nodeId })
+        .select('tailscaleIP')
+        .lean();
+      if (nodeDoc?.tailscaleIP) {
+        targetAddress = `${nodeDoc.tailscaleIP}:${port}`;
+      }
+    } catch (e) {
+      // silently ignore
+    }
+
     routingTable.set(dep.domain, {
       deploymentId: dep.deploymentId,
       siteId: dep.siteId,
@@ -95,6 +108,7 @@ async function rebuildRoutingTable() {
       nodeId: node.nodeId,
       nodeName: node.name,
       port,
+      targetAddress,
       version: dep.version,
     });
   }
