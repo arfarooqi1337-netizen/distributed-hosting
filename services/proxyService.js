@@ -88,14 +88,14 @@ async function rebuildRoutingTable() {
     const port = dep.containerInfo?.exposedPort || 0;
     if (!port) continue;
 
-    // Resolve target address from node's tailscale IP
+    // Resolve target address from node's tailscale IP (stored in capabilities)
     let targetAddress = null;
     try {
       const nodeDoc = await Node.findOne({ nodeId: node.nodeId })
-        .select('tailscaleIP')
+        .select('capabilities.tailscaleIp')
         .lean();
-      if (nodeDoc?.tailscaleIP) {
-        targetAddress = `${nodeDoc.tailscaleIP}:${port}`;
+      if (nodeDoc?.capabilities?.tailscaleIp) {
+        targetAddress = `${nodeDoc.capabilities.tailscaleIp}:${port}`;
       }
     } catch (e) {
       // silently ignore
