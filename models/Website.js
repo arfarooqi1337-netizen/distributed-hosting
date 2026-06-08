@@ -22,6 +22,11 @@ const websiteSchema = new mongoose.Schema(
       trim: true,
       lowercase: true,
     },
+    customDomains: [{
+      type: String,
+      trim: true,
+      lowercase: true,
+    }],
     type: {
       type: String,
       enum: ['static', 'nodejs', 'python', 'php', 'custom'],

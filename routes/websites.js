@@ -196,4 +196,159 @@ router.delete('/:siteId', authenticateAdmin, async (req, res, next) => {
   }
 });
 
+/**
+ * POST /api/websites/:siteId/domains
+ * Add a custom domain to a website
+ */
+router.post('/:siteId/domains', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { domain } = req.body;
+    if (!domain) return res.status(400).json({ error: 'Domain is required' });
+
+    const website = await Website.findOne({ siteId: req.params.siteId });
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+
+    const domainLower = domain.toLowerCase().trim();
+    if (website.customDomains && website.customDomains.includes(domainLower)) {
+      return res.status(409).json({ error: 'Domain already added' });
+    }
+
+    website.customDomains = [...(website.customDomains || []), domainLower];
+    await website.save();
+
+    // Regenerate Caddyfile to include new domain
+    const proxyService = require('../services/proxyService');
+    proxyService.generateCaddyfile().catch(() => {});
+    proxyService.reloadCaddy().catch(() => {});
+
+    res.json({ success: true, customDomains: website.customDomains });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/websites/:siteId/domains/:domain
+ * Remove a custom domain from a website
+ */
+router.delete('/:siteId/domains/:domain', authenticateAdmin, async (req, res, next) => {
+  try {
+    const website = await Website.findOne({ siteId: req.params.siteId });
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+
+    website.customDomains = (website.customDomains || []).filter(
+      d => d !== req.params.domain.toLowerCase()
+    );
+    await website.save();
+
+    const proxyService = require('../services/proxyService');
+    proxyService.generateCaddyfile().catch(() => {});
+    proxyService.reloadCaddy().catch(() => {});
+
+    res.json({ success: true, customDomains: website.customDomains });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/websites/:siteId/files
+ * List files in the deployed website's extracted directory
+ */
+router.get('/:siteId/files', authenticateAdmin, async (req, res, next) => {
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const DEPLOYMENTS_DIR = path.join(__dirname, '..', 'deployments');
+
+    const deployment = await require('../models/Deployment').findOne({
+      siteId: req.params.siteId,
+      status: 'active',
+    }).sort({ createdAt: -1 }).lean();
+
+    if (!deployment) return res.status(404).json({ error: 'No active deployment found' });
+
+    // Try extracted directory first, then the artifact zip
+    const extractDir = path.join(DEPLOYMENTS_DIR, deployment.deploymentId, 'extracted');
+    const subdir = req.query.path || '';
+
+    if (!fs.existsSync(extractDir)) {
+      return res.json({ files: [], path: subdir, extracted: false });
+    }
+
+    const targetPath = path.join(extractDir, subdir);
+    // Security: prevent directory traversal
+    if (!targetPath.startsWith(extractDir)) {
+      return res.status(403).json({ error: 'Invalid path' });
+    }
+
+    if (!fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: 'Path not found' });
+    }
+
+    const stat = fs.statSync(targetPath);
+    if (stat.isDirectory()) {
+      const entries = fs.readdirSync(targetPath, { withFileTypes: true });
+      const files = entries.map(e => {
+        const fullPath = path.join(targetPath, e.name);
+        const s = fs.statSync(fullPath);
+        return {
+          name: e.name,
+          type: e.isDirectory() ? 'directory' : 'file',
+          size: s.size,
+          modified: s.mtime,
+        };
+      }).sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      return res.json({ files, path: subdir, extracted: true });
+    }
+
+    // Return single file
+    const content = fs.readFileSync(targetPath, 'utf-8');
+    res.json({ files: [{ name: path.basename(targetPath), type: 'file', size: stat.size, content }], path: subdir, extracted: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/websites/:siteId/files
+ * Save a file in the deployed website
+ */
+router.put('/:siteId/files', authenticateAdmin, async (req, res, next) => {
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const DEPLOYMENTS_DIR = path.join(__dirname, '..', 'deployments');
+
+    const { filePath: relPath, content } = req.body;
+    if (!relPath) return res.status(400).json({ error: 'filePath is required' });
+
+    const deployment = await require('../models/Deployment').findOne({
+      siteId: req.params.siteId,
+      status: 'active',
+    }).sort({ createdAt: -1 }).lean();
+
+    if (!deployment) return res.status(404).json({ error: 'No active deployment found' });
+
+    const extractDir = path.join(DEPLOYMENTS_DIR, deployment.deploymentId, 'extracted');
+    const targetPath = path.join(extractDir, relPath);
+
+    if (!targetPath.startsWith(extractDir)) {
+      return res.status(403).json({ error: 'Invalid path' });
+    }
+
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, content, 'utf-8');
+
+    logger.info(`File saved: ${relPath} for site ${req.params.siteId}`);
+    res.json({ success: true, path: relPath });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

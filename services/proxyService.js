@@ -350,6 +350,22 @@ ${siteId}.localhost {
 }
 
 `;
+      // Add custom domain aliases if they exist
+      try {
+        const siteDoc = await require('../models/Website').findOne({ siteId }).lean();
+        if (siteDoc && siteDoc.customDomains && siteDoc.customDomains.length > 0) {
+          for (const customDomain of siteDoc.customDomains) {
+            caddyfile += `# Custom domain: ${customDomain} -> ${entry.domain}
+${customDomain} {
+    redir https://${entry.domain}{uri} permanent
+}
+
+`;
+          }
+        }
+      } catch (e) {
+        // Silently skip custom domain errors
+      }
     }
   }
 
