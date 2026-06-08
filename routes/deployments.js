@@ -513,6 +513,88 @@ router.post('/:id/rollback', authenticateAdmin, auditMiddleware, async (req, res
   }
 });
 
+/**
+ * POST /api/deployments/redeploy
+ * Re-deploy the last active deployment for a website.
+ */
+router.post('/redeploy', authenticateAdmin, auditMiddleware, async (req, res, next) => {
+  try {
+    const { deploymentId } = req.body;
+    if (!deploymentId) return res.status(400).json({ error: 'deploymentId is required' });
+
+    const oldDeployment = await Deployment.findOne({ deploymentId }).lean();
+    if (!oldDeployment) return res.status(404).json({ error: 'Deployment not found' });
+
+    const newDeployment = await deploymentService.createDeployment({
+      siteId: oldDeployment.siteId,
+      domain: oldDeployment.domain,
+      type: oldDeployment.type,
+      source: {
+        type: oldDeployment.source?.type || 'upload',
+        filename: oldDeployment.source?.filename || '',
+        filePath: oldDeployment.source?.filePath || '',
+        size: oldDeployment.source?.size || 0,
+        checksum: oldDeployment.source?.checksum || '',
+      },
+      buildConfig: oldDeployment.buildConfig || {},
+      createdBy: req.admin?.email || 'admin',
+    });
+
+    // If the old deployment has an artifact, copy it
+    if (oldDeployment.source?.filePath) {
+      const fs = require('fs');
+      const path = require('path');
+      const storageService = require('../services/storageService');
+      const artifactInfo = storageService.getArtifactInfo(oldDeployment);
+      try {
+        const srcPath = await storageService.getArtifactPath(oldDeployment.deploymentId, artifactInfo);
+        if (srcPath && fs.existsSync(srcPath)) {
+          const storageInfo = await storageService.saveUploadedFile(
+            newDeployment.deploymentId,
+            { buffer: fs.readFileSync(srcPath), originalname: artifactInfo.filename || 'artifact.zip' }
+          );
+          await Deployment.updateOne(
+            { deploymentId: newDeployment.deploymentId },
+            {
+              $set: {
+                'source.filePath': storageInfo.filePath,
+                'source.checksum': storageInfo.checksum,
+                'source.filename': storageInfo.filename,
+                'source.size': storageInfo.size,
+              },
+              $push: {
+                artifacts: {
+                  filename: storageInfo.filename,
+                  filePath: storageInfo.filePath,
+                  size: storageInfo.size,
+                  checksum: storageInfo.checksum,
+                  storageType: storageInfo.storageType,
+                  storageNodeId: storageInfo.storageNodeId,
+                  uploadedAt: new Date(),
+                },
+              },
+            }
+          );
+        }
+      } catch (copyErr) {
+        logger.warn(`Could not copy artifact for re-deploy: ${copyErr.message}`);
+      }
+    }
+
+    const io = req.app.get('io');
+    deploymentService.processDeployment(newDeployment.deploymentId, io)
+      .catch(err => logger.error(`Re-deploy error: ${err.message}`));
+
+    res.status(201).json({
+      success: true,
+      message: 'Re-deployment created',
+      deployment: newDeployment.toJSON(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ─── Node reports deployment status ──────────────────────────────────────
 
 /**

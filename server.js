@@ -38,6 +38,7 @@ const { startNodeHistorySnapshot } = require('./services/nodeHistoryService');
 const { startHealthChecks } = require('./services/healthCheckService');
 const proxyService = require('./services/proxyService');
 const { startFailoverService } = require('./services/failoverService');
+const { startDeploymentTimeoutChecker } = require('./services/deploymentTimeout');
 
 // Models
 const Admin = require('./models/Admin');
@@ -235,6 +236,9 @@ async function start() {
 
     // Start failover monitoring for multi-node websites
     const failoverInterval = startFailoverService(io);
+
+    // Start deployment timeout checker — prevents stuck deployments
+    const deployTimeoutInterval = startDeploymentTimeoutChecker(io);
 
     // Initialize reverse proxy (non-blocking — gracefully handles missing Caddy)
     if (config.proxy.enabled && config.proxy.autoStart) {
