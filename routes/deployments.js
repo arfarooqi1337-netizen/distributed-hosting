@@ -25,7 +25,7 @@ const router = express.Router();
 const Deployment = require('../models/Deployment');
 const Website = require('../models/Website');
 const Node = require('../models/Node');
-const { authenticateAdmin, authenticateNode } = require('../middleware/auth');
+const { authenticateAdmin, authenticateNode, optionalAuth } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const deploymentService = require('../services/deploymentService');
 const storageService = require('../services/storageService');
@@ -58,12 +58,19 @@ const upload = multer({
  * GET /api/deployments
  * List all deployments with pagination and filters
  */
-router.get('/', authenticateAdmin, async (req, res, next) => {
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const { status, siteId, limit = 50, offset = 0 } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (siteId) filter.siteId = siteId;
+
+    // Client scope: only see own deployments
+    if (req.clientId) {
+      filter.clientId = req.clientId;
+    } else if (!req.admin) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const parseNum = (val, def) => {
       const n = parseInt(val, 10);
@@ -419,7 +426,7 @@ router.get('/:id/download', authenticateNode, async (req, res, next) => {
  * GET /api/deployments/:id
  * Get full deployment details with logs.
  */
-router.get('/:id', authenticateAdmin, async (req, res, next) => {
+router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
     const deployment = await Deployment.findOne({ deploymentId: req.params.id })
       .populate('assignedNode', 'nodeId name status mode metrics')
@@ -427,6 +434,11 @@ router.get('/:id', authenticateAdmin, async (req, res, next) => {
 
     if (!deployment) {
       return res.status(404).json({ error: 'Deployment not found' });
+    }
+
+    // Client scope: only own deployments
+    if (req.clientId && deployment.clientId !== req.clientId) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     // Also get the extracted file tree if available

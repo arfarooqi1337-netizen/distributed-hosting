@@ -32,6 +32,11 @@ const websiteSchema = new mongoose.Schema(
       enum: ['static', 'nodejs', 'python', 'php', 'custom'],
       default: 'static',
     },
+    clientId: {
+      type: String,
+      default: '',
+      index: true,
+    },
     status: {
       type: String,
       enum: ['active', 'paused', 'deploying', 'failed', 'removed'],

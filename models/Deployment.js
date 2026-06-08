@@ -22,6 +22,11 @@ const deploymentSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    clientId: {
+      type: String,
+      default: '',
+      index: true,
+    },
     domain: {
       type: String,
       required: true,

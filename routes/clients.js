@@ -10,13 +10,111 @@
 
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 
 const Client = require('../models/Client');
 const Project = require('../models/Project');
-const { authenticateAdmin } = require('../middleware/auth');
+const Website = require('../models/Website');
+const Deployment = require('../models/Deployment');
+const config = require('../config');
+const { authenticateAdmin, authenticateClient } = require('../middleware/auth');
 const { auditMiddleware } = require('../middleware/audit');
 const logger = require('../config/logger');
+
+/**
+ * POST /api/clients/login
+ * Client login — returns JWT token
+ */
+router.post('/login', async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    const client = await Client.findOne({ email: email.toLowerCase() });
+    if (!client) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (client.status !== 'active') {
+      return res.status(403).json({ error: 'Account is not active' });
+    }
+
+    // Validate password
+    if (!client.password) {
+      return res.status(401).json({ error: 'No password set. Contact admin for setup.' });
+    }
+    const valid = await bcrypt.compare(password, client.password);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Update last login
+    await Client.updateOne(
+      { clientId: client.clientId },
+      { $set: { lastLoginAt: new Date(), lastLoginIp: req.ip } }
+    );
+
+    const token = jwt.sign(
+      { clientId: client.clientId, email: client.email, name: client.name, type: 'client' },
+      config.jwt.secret,
+      { expiresIn: config.jwt.expiresIn }
+    );
+
+    logger.info(`Client logged in: ${email}`);
+    res.json({
+      success: true,
+      token,
+      client: {
+        clientId: client.clientId,
+        email: client.email,
+        name: client.name,
+        plan: client.plan,
+        status: client.status,
+        limits: client.limits,
+        usage: client.usage,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/clients/me
+ * Get the authenticated client's own profile, projects, and websites
+ */
+router.get('/me', authenticateClient, async (req, res, next) => {
+  try {
+    const client = await Client.findOne({ clientId: req.clientId }).lean();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const projects = await Project.find({ clientId: req.clientId }).sort({ createdAt: -1 }).lean();
+    const websites = await Website.find({ clientId: req.clientId }).sort({ createdAt: -1 }).lean();
+
+    res.json({
+      success: true,
+      client: {
+        clientId: client.clientId,
+        email: client.email,
+        name: client.name,
+        company: client.company,
+        plan: client.plan,
+        status: client.status,
+        limits: client.limits,
+        usage: client.usage,
+        createdAt: client.createdAt,
+      },
+      projects,
+      websites,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * GET /api/clients

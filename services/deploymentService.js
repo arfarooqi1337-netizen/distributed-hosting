@@ -43,13 +43,23 @@ async function getNextVersion(siteId) {
 /**
  * Create a new deployment record.
  */
-async function createDeployment({ siteId, domain, type, source, buildConfig, createdBy }) {
+async function createDeployment({ siteId, domain, type, source, buildConfig, createdBy, clientId }) {
   const deploymentId = `deploy_${uuidv4().split('-')[0]}`;
   const version = await getNextVersion(siteId);
+
+  // Look up clientId from the website if not provided
+  let ownerClientId = clientId || '';
+  if (!ownerClientId) {
+    try {
+      const website = await require('../models/Website').findOne({ siteId }).select('clientId').lean();
+      if (website?.clientId) ownerClientId = website.clientId;
+    } catch (e) { /* silent */ }
+  }
 
   const deployment = await Deployment.create({
     deploymentId,
     siteId,
+    clientId: ownerClientId,
     domain,
     version,
     type: type || 'static',

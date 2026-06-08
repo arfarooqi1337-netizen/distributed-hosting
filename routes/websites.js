@@ -16,19 +16,27 @@ const router = express.Router();
 
 const Website = require('../models/Website');
 const Node = require('../models/Node');
-const { authenticateAdmin } = require('../middleware/auth');
+const { authenticateAdmin, optionalAuth } = require('../middleware/auth');
 const { validateCreateWebsite } = require('../middleware/validation');
 const logger = require('../config/logger');
 const storageService = require('../services/storageService');
 
 /**
  * GET /api/websites
- * List all websites
+ * List all websites (admin sees all, client sees own)
  */
-router.get('/', authenticateAdmin, async (req, res, next) => {
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const { status } = req.query;
     const filter = {};
+
+    // Client scope: only see own websites
+    if (req.clientId) {
+      filter.clientId = req.clientId;
+    } else if (!req.admin) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
     if (status) filter.status = status;
 
     const websites = await Website.find(filter)
@@ -48,11 +56,21 @@ router.get('/', authenticateAdmin, async (req, res, next) => {
 
 /**
  * POST /api/websites
- * Create a new website deployment
+ * Create a new website (admin or client)
  */
-router.post('/', authenticateAdmin, validateCreateWebsite, async (req, res, next) => {
+router.post('/', optionalAuth, validateCreateWebsite, async (req, res, next) => {
   try {
-    const { domain, type, assignedNodeIds, source } = req.body;
+    const { domain, type, assignedNodeIds, source, clientId } = req.body;
+
+    // Authorization: admin can create for any client, client can create own
+    let ownerClientId = null;
+    if (req.clientId) {
+      ownerClientId = req.clientId;
+    } else if (req.admin) {
+      ownerClientId = clientId || null;
+    } else {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     // Check for duplicate domain
     const existing = await Website.findOne({ domain });
@@ -86,11 +104,12 @@ router.post('/', authenticateAdmin, validateCreateWebsite, async (req, res, next
       type: type || 'static',
       status: 'deploying',
       source: source || {},
+      clientId: ownerClientId,
       assignedNodes: nodes.map((n) => n._id),
       primaryNode,
     });
 
-    logger.info(`Website created: ${domain} (${siteId})`);
+    logger.info(`Website created: ${domain} (${siteId}) by client=${ownerClientId || 'admin'}`);
 
     res.status(201).json({ success: true, website: website.toJSON() });
   } catch (error) {
@@ -100,9 +119,9 @@ router.post('/', authenticateAdmin, validateCreateWebsite, async (req, res, next
 
 /**
  * GET /api/websites/:siteId
- * Get website details
+ * Get website details (admin sees all, client sees own)
  */
-router.get('/:siteId', authenticateAdmin, async (req, res, next) => {
+router.get('/:siteId', optionalAuth, async (req, res, next) => {
   try {
     const website = await Website.findOne({ siteId: req.params.siteId })
       .populate('assignedNodes', 'nodeId name status mode metrics score')
@@ -114,6 +133,11 @@ router.get('/:siteId', authenticateAdmin, async (req, res, next) => {
 
     if (!website) {
       return res.status(404).json({ error: 'Website not found' });
+    }
+
+    // Client scope: only own websites
+    if (req.clientId && website.clientId !== req.clientId) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     res.json({ success: true, website });
