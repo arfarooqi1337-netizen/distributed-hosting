@@ -285,7 +285,7 @@ async function generateCaddyfile() {
 # Managed sites: ${entries.length}${fallbackSites.length > 0 ? `, fallback: ${fallbackSites.length}` : ''}
 
 {
-    admin off
+    admin 127.0.0.1:2019
     persist_config off
 }
 
