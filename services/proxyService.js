@@ -88,14 +88,26 @@ async function rebuildRoutingTable() {
     const port = dep.containerInfo?.exposedPort || 0;
     if (!port) continue;
 
-    // Resolve target address from node's tailscale IP (stored in capabilities)
+    // Resolve target address from the website's activeNode (may differ from assignedNode after failover)
     let targetAddress = null;
     try {
-      const nodeDoc = await Node.findOne({ nodeId: node.nodeId })
-        .select('capabilities.tailscaleIp')
+      const website = await Website.findOne({ siteId: dep.siteId })
+        .populate('activeNode', 'nodeId name capabilities.tailscaleIp')
         .lean();
-      if (nodeDoc?.capabilities?.tailscaleIp) {
-        targetAddress = `${nodeDoc.capabilities.tailscaleIp}:${port}`;
+      if (website?.activeNode) {
+        const tailscaleIp = website.activeNode.capabilities?.tailscaleIp || website.activeNode.ipAddress;
+        if (tailscaleIp) {
+          targetAddress = `${tailscaleIp}:${port}`;
+        }
+      }
+      // Fallback: use the deployment's assigned node
+      if (!targetAddress) {
+        const nodeDoc = await Node.findOne({ nodeId: node.nodeId })
+          .select('capabilities.tailscaleIp')
+          .lean();
+        if (nodeDoc?.capabilities?.tailscaleIp) {
+          targetAddress = `${nodeDoc.capabilities.tailscaleIp}:${port}`;
+        }
       }
     } catch (e) {
       // silently ignore
