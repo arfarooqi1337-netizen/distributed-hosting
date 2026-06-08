@@ -8,7 +8,7 @@
     "dev": "nodemon server.js",
     "test": "jest --coverage",
     "lint": "eslint . --ext .js",
-    "test:e2e": "node ../tests/e2e/run-e2e.js"
+    "test:e2e": "node tests/e2e/run-e2e.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
