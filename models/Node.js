@@ -35,7 +35,7 @@ const nodeSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    // API key rotation support
+                           // API key rotation support
     pendingApiKey: {
       type: String,
       default: '',

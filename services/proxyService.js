@@ -260,7 +260,6 @@ async function generateCaddyfile() {
 {
     admin off
     persist_config off
-    data_dir ${CADDY_DATA_DIR.replace(/\\/g, '/')}
 }
 
 # Health/metrics endpoint
@@ -458,7 +457,7 @@ async function startCaddy() {
   }
 
   try {
-    caddyProcess = spawn(CADDY_BIN, ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile'], {
+    caddyProcess = spawn(CADDY_BIN, ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile', '--data-dir', CADDY_DATA_DIR], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
