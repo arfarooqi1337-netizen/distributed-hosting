@@ -405,25 +405,36 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
       }
     }
 
-    // If deployment failed, mark website as failed too
+    // If deployment failed, mark website as failed too — but ONLY if no node succeeded
     if (status === 'failed') {
       const deployment = await Deployment.findOne({ deploymentId }).lean();
       if (deployment) {
-        await Website.updateOne(
-          { siteId: deployment.siteId },
-          { $set: { status: 'failed' } }
+        // Check if ANY node already reported success
+        const anySuccess = deployment.nodeResults?.some(
+          nr => nr.status === 'active' || nr.status === 'success'
         );
+        if (!anySuccess) {
+          await Deployment.updateOne(
+            { deploymentId },
+            { $set: { status: 'failed' } }
+          );
+          await Website.updateOne(
+            { siteId: deployment.siteId },
+            { $set: { status: 'failed' } }
+          );
 
-        // Create alert
-        await Alert.create({
-          alertId: `alert_${uuidv4().split('-')[0]}`,
-          type: 'website_down',
-          severity: 'critical',
-          message: `Deployment failed for ${deployment.domain}: ${message || 'Unknown error'}`,
-          nodeId: deployment.assignedNodeId,
-          nodeName: '',
-          metadata: { deploymentId, siteId: deployment.siteId, version: deployment.version },
-        });
+          await Alert.create({
+            alertId: `alert_${uuidv4().split('-')[0]}`,
+            type: 'website_down',
+            severity: 'critical',
+            message: `Deployment failed for ${deployment.domain}: ${message || 'Unknown error'}`,
+            nodeId: deployment.assignedNodeId,
+            nodeName: '',
+            metadata: { deploymentId, siteId: deployment.siteId, version: deployment.version },
+          });
+        } else {
+          logger.warn(`Deployment ${deploymentId} node ${reportingNodeId} failed, but another node already succeeded — keeping status as active`);
+        }
       }
     }
 

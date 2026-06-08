@@ -19,6 +19,7 @@ const Node = require('../models/Node');
 const { authenticateAdmin } = require('../middleware/auth');
 const { validateCreateWebsite } = require('../middleware/validation');
 const logger = require('../config/logger');
+const storageService = require('../services/storageService');
 
 /**
  * GET /api/websites
@@ -261,16 +262,27 @@ router.get('/:siteId/files', authenticateAdmin, async (req, res, next) => {
     const fs = require('fs');
     const DEPLOYMENTS_DIR = path.join(__dirname, '..', 'deployments');
 
+    // Find the latest deployment (active or failed — files may still be accessible)
     const deployment = await require('../models/Deployment').findOne({
       siteId: req.params.siteId,
-      status: 'active',
     }).sort({ createdAt: -1 }).lean();
 
-    if (!deployment) return res.status(404).json({ error: 'No active deployment found' });
+    if (!deployment) return res.status(404).json({ error: 'No deployment found for this site' });
 
-    // Try extracted directory first, then the artifact zip
     const extractDir = path.join(DEPLOYMENTS_DIR, deployment.deploymentId, 'extracted');
     const subdir = req.query.path || '';
+
+    // If not extracted yet, try to download artifact from storage and extract
+    if (!fs.existsSync(extractDir)) {
+      try {
+        const artifactInfo = storageService.getArtifactInfo(deployment);
+        const zipPath = await storageService.getArtifactPath(deployment.deploymentId, artifactInfo);
+        await storageService.extractArchive(deployment.deploymentId, zipPath);
+      } catch (err) {
+        logger.warn(`File manager: could not retrieve artifact for ${deployment.deploymentId}: ${err.message}`);
+        return res.json({ files: [], path: subdir, extracted: false, error: 'Artifact not available. Files may only be accessible on the hosting node.' });
+      }
+    }
 
     if (!fs.existsSync(extractDir)) {
       return res.json({ files: [], path: subdir, extracted: false });
@@ -327,14 +339,26 @@ router.put('/:siteId/files', authenticateAdmin, async (req, res, next) => {
     const { filePath: relPath, content } = req.body;
     if (!relPath) return res.status(400).json({ error: 'filePath is required' });
 
+    // Find latest deployment (any status)
     const deployment = await require('../models/Deployment').findOne({
       siteId: req.params.siteId,
-      status: 'active',
     }).sort({ createdAt: -1 }).lean();
 
-    if (!deployment) return res.status(404).json({ error: 'No active deployment found' });
+    if (!deployment) return res.status(404).json({ error: 'No deployment found for this site' });
 
     const extractDir = path.join(DEPLOYMENTS_DIR, deployment.deploymentId, 'extracted');
+
+    // Ensure files are available locally
+    if (!fs.existsSync(extractDir)) {
+      try {
+        const artifactInfo = storageService.getArtifactInfo(deployment);
+        const zipPath = await storageService.getArtifactPath(deployment.deploymentId, artifactInfo);
+        await storageService.extractArchive(deployment.deploymentId, zipPath);
+      } catch (err) {
+        return res.status(503).json({ error: 'Artifact not available locally. Cannot save files.' });
+      }
+    }
+
     const targetPath = path.join(extractDir, relPath);
 
     if (!targetPath.startsWith(extractDir)) {
