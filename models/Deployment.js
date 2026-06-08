@@ -61,8 +61,10 @@ const deploymentSchema = new mongoose.Schema(
       buildCommand: { type: String, default: '' },
       outputDir: { type: String, default: '' },
       installCommand: { type: String, default: '' },
+      internalPort: { type: Number, default: 80 },
       nodeVersion: { type: String, default: '18' },
       pythonVersion: { type: String, default: '3.11' },
+      environmentVariables: [{ key: String, value: String }],
     },
     // Status tracking
     status: {

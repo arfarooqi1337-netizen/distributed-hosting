@@ -31,8 +31,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-*.zip
-
 # Private keys
 *.pem
 *.ppk
@@ -40,3 +38,9 @@ id_rsa
 id_rsa.pub
 id_ed25519
 id_ed25519.pub
+
+# Runtime data
+caddy_data/
+deployments/
+PROXY_ROUTES.txt
+*.zip

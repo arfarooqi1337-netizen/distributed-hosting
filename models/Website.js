@@ -49,6 +49,11 @@ const websiteSchema = new mongoose.Schema(
       buildCommand: { type: String, default: '' },
       outputDir: { type: String, default: '' },
     },
+    // Environment variables (key-value pairs, values encrypted at rest)
+    environmentVariables: [{
+      key: { type: String, required: true },
+      value: { type: String, required: true },
+    }],
     // Node assignments
     assignedNodes: [
       {

@@ -77,8 +77,10 @@ async function createDeployment({ siteId, domain, type, source, buildConfig, cre
       buildCommand: buildConfig?.buildCommand || '',
       outputDir: buildConfig?.outputDir || '',
       installCommand: buildConfig?.installCommand || '',
+      internalPort: buildConfig?.internalPort || 80,
       nodeVersion: buildConfig?.nodeVersion || '18',
       pythonVersion: buildConfig?.pythonVersion || '3.11',
+      environmentVariables: buildConfig?.environmentVariables || [],
     },
     status: 'pending',
     createdBy: createdBy || 'admin',
@@ -192,7 +194,8 @@ async function processDeployment(deploymentId, io) {
       installCommand: deployment.buildConfig.installCommand,
       nodeVersion: deployment.buildConfig.nodeVersion,
       pythonVersion: deployment.buildConfig.pythonVersion,
-      internalPort: 8080,
+      internalPort: deployment.buildConfig.internalPort || 8080,
+      environmentVariables: deployment.buildConfig.environmentVariables || [],
     };
 
     const cmd = await Command.create({

@@ -399,4 +399,150 @@ router.put('/:siteId/files', authenticateAdmin, async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/websites/:siteId/env-vars
+ * List environment variables for a website (values masked for clients)
+ */
+router.get('/:siteId/env-vars', optionalAuth, async (req, res, next) => {
+  try {
+    const website = await Website.findOne({ siteId: req.params.siteId }).lean();
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+
+    // Client scope check
+    if (req.clientId && website.clientId !== req.clientId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Mask values for non-admin users
+    const isAdmin = !!req.admin;
+    const vars = (website.environmentVariables || []).map(v => ({
+      key: v.key,
+      value: isAdmin ? v.value : '••••••••',
+    }));
+
+    res.json({ success: true, variables: vars });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/websites/:siteId/env-vars
+ * Set environment variables (replaces all)
+ */
+router.put('/:siteId/env-vars', optionalAuth, async (req, res, next) => {
+  try {
+    const { variables } = req.body;
+    if (!Array.isArray(variables)) {
+      return res.status(400).json({ error: 'variables must be an array of { key, value }' });
+    }
+
+    const website = await Website.findOne({ siteId: req.params.siteId });
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+
+    // Client scope check
+    if (req.clientId && website.clientId !== req.clientId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    website.environmentVariables = variables.map(v => ({
+      key: v.key.trim(),
+      value: v.value,
+    }));
+    await website.save();
+
+    logger.info(`Environment variables updated for site ${req.params.siteId}`);
+    res.json({ success: true, variables: website.environmentVariables });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/websites/:siteId/verify-domain
+ * Verify DNS points to the main VPS
+ */
+router.post('/:siteId/verify-domain', optionalAuth, async (req, res, next) => {
+  try {
+    const website = await Website.findOne({ siteId: req.params.siteId }).lean();
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+
+    // Client scope check
+    if (req.clientId && website.clientId !== req.clientId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const dns = require('dns').promises;
+    const VPS_PUBLIC_IP = '13.250.17.15';
+    const results = [];
+
+    // Check main domain
+    try {
+      const addresses = await dns.resolve4(website.domain);
+      const matches = addresses.includes(VPS_PUBLIC_IP);
+      results.push({
+        domain: website.domain,
+        type: 'A',
+        expected: VPS_PUBLIC_IP,
+        resolved: addresses,
+        match: matches,
+      });
+    } catch (e) {
+      results.push({ domain: website.domain, type: 'A', error: e.message, match: false });
+    }
+
+    // Check custom domains
+    for (const customDomain of (website.customDomains || [])) {
+      try {
+        const addresses = await dns.resolve4(customDomain);
+        const matches = addresses.includes(VPS_PUBLIC_IP);
+        results.push({
+          domain: customDomain,
+          type: 'A',
+          expected: VPS_PUBLIC_IP,
+          resolved: addresses,
+          match: matches,
+        });
+      } catch (e) {
+        results.push({ domain: customDomain, type: 'A', error: e.message, match: false });
+      }
+    }
+
+    // Check HTTP reachability (port 80)
+    const http = require('http');
+    const httpResults = [];
+    for (const entry of results) {
+      if (!entry.match && !entry.error) continue;
+      try {
+        await new Promise((resolve, reject) => {
+          const req = http.get(`http://${entry.domain}`, (res) => {
+            httpResults.push({ domain: entry.domain, statusCode: res.statusCode, reachable: true });
+            resolve();
+          });
+          req.on('error', () => {
+            httpResults.push({ domain: entry.domain, reachable: false });
+            resolve();
+          });
+          req.setTimeout(5000, () => { req.destroy(); resolve(); });
+        });
+      } catch (e) {
+        httpResults.push({ domain: entry.domain, reachable: false, error: e.message });
+      }
+    }
+
+    const allMatch = results.every(r => r.match);
+    res.json({
+      success: true,
+      verified: allMatch,
+      dns: results,
+      http: httpResults,
+      message: allMatch
+        ? 'DNS is correctly configured'
+        : 'DNS is not pointing to the main VPS IP. Add an A record pointing to ' + VPS_PUBLIC_IP,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

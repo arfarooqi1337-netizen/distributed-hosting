@@ -153,7 +153,7 @@ router.post(
       const deployment = await deploymentService.createDeployment({
         siteId: website.siteId,
         domain: website.domain,
-        type: type || website.type || 'static',
+        type: type || 'static',
         source: {
           type: 'upload',
           filename: req.file.originalname || 'artifact.zip',
@@ -163,6 +163,8 @@ router.post(
           buildCommand: buildCommand || '',
           outputDir: outputDir || '',
           installCommand: installCommand || '',
+          internalPort: 80,
+          environmentVariables: (website?.environmentVariables || []).map(v => ({ key: v.key, value: v.value })),
         },
         createdBy: req.admin?.email || 'admin',
       });
@@ -173,7 +175,49 @@ router.post(
         req.file
       );
 
-      // Update deployment with file info
+      // Auto-detect app type using build resolver (if type not explicitly set)
+      let detectedBuild = null;
+      if (!type) {
+        try {
+          // Extract archive first
+          await storageService.extractArchive(deployment.deploymentId, fileInfo.filePath);
+          const extractDir = path.join(__dirname, '..', 'deployments', deployment.deploymentId, 'extracted');
+          if (require('fs').existsSync(extractDir)) {
+            const entries = require('fs').readdirSync(extractDir, { withFileTypes: true });
+            const files = entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' }));
+            for (const entry of entries) {
+              if (entry.isDirectory()) {
+                try {
+                  const sub = require('fs').readdirSync(path.join(extractDir, entry.name), { withFileTypes: true });
+                  for (const s of sub) files.push({ name: `${entry.name}/${s.name}`, type: s.isDirectory() ? 'directory' : 'file' });
+                } catch (_) {}
+              }
+            }
+            const buildResolver = require('../services/buildResolver');
+            detectedBuild = buildResolver.resolveBuildConfig(files);
+            logger.info(`Build resolver detected: ${detectedBuild.type} (${detectedBuild.confidence}) for ${domain}`);
+          }
+        } catch (e) {
+          logger.warn(`Build resolver skipped for ${domain}: ${e.message}`);
+        }
+      }
+
+      // Merge detected config with user-provided overrides
+      const mergedType = type || detectedBuild?.type || 'static';
+      const mergedInstall = installCommand || detectedBuild?.installCommand || '';
+      const mergedBuild = buildCommand || detectedBuild?.buildCommand || '';
+      const mergedOutput = outputDir || detectedBuild?.outputDir || '';
+      const mergedPort = detectedBuild?.internalPort || 80;
+
+      // Update website type if auto-detected
+      if (!type && detectedBuild && website.type !== mergedType) {
+        await Website.updateOne(
+          { siteId: website.siteId },
+          { $set: { type: mergedType, 'source.buildCommand': mergedBuild, 'source.outputDir': mergedOutput } }
+        );
+      }
+
+      // Update deployment with file info and detected config
       await Deployment.updateOne(
         { deploymentId: deployment.deploymentId },
         {
@@ -182,8 +226,14 @@ router.post(
             'source.checksum': fileInfo.checksum,
             'source.filename': fileInfo.filename,
             'source.size': fileInfo.size,
+            type: mergedType,
+            'buildConfig.buildCommand': mergedBuild,
+            'buildConfig.outputDir': mergedOutput,
+            'buildConfig.installCommand': mergedInstall,
+            'buildConfig.internalPort': mergedPort,
             status: 'processing',
-          },          $push: {
+          },
+          $push: {
             artifacts: {
               filename: fileInfo.filename,
               filePath: fileInfo.filePath,
@@ -193,13 +243,16 @@ router.post(
               storageNodeId: fileInfo.storageNodeId,
               uploadedAt: new Date(),
             },
-          },        }
+          },
+        }
       );
 
-      // Extract archive for preview (non-blocking)
-      storageService.extractArchive(deployment.deploymentId, fileInfo.filePath)
-        .then(() => logger.debug(`Extracted ${deployment.deploymentId}`))
-        .catch((err) => logger.warn(`Extraction warning: ${err.message}`));
+      // Extract archive for preview (non-blocking — if not already done above)
+      if (type) {
+        storageService.extractArchive(deployment.deploymentId, fileInfo.filePath)
+          .then(() => logger.debug(`Extracted ${deployment.deploymentId}`))
+          .catch((err) => logger.warn(`Extraction warning: ${err.message}`));
+      }
 
       // Audit log
       await res.auditLog('deployment_created', 'website', website.siteId, {
