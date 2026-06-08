@@ -35,6 +35,28 @@ const nodeSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    // API key rotation support
+    pendingApiKey: {
+      type: String,
+      default: '',
+    },
+    apiKeyVersion: {
+      type: Number,
+      default: 1,
+    },
+    apiKeyRotatedAt: {
+      type: Date,
+      default: null,
+    },
+    apiKeyLastUsedAt: {
+      type: Date,
+      default: null,
+    },
+    apiKeyRotationStatus: {
+      type: String,
+      enum: ['', 'pending', 'confirmed', 'failed'],
+      default: '',
+    },
     // Type classification
     type: {
       type: String,

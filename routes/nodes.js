@@ -382,4 +382,121 @@ router.get('/:nodeId/history', authenticateAdmin, async (req, res, next) => {
   }
 });
 
+/**
+ * POST /api/nodes/:nodeId/rotate-key
+ * Admin: Rotate a node's API key.
+ * Generates a new key, stores it as pending, sends command to node.
+ */
+router.post('/:nodeId/rotate-key', authenticateAdmin, auditMiddleware, async (req, res, next) => {
+  try {
+    const node = await Node.findOne({ nodeId: req.params.nodeId });
+    if (!node) return res.status(404).json({ error: 'Node not found' });
+
+    const newApiKey = Node.generateApiKey();
+    const commandId = uuidv4();
+
+    // Store pending key
+    node.pendingApiKey = newApiKey;
+    node.apiKeyRotationStatus = 'pending';
+    await node.save();
+
+    // Send rotate_api_key command to node
+    await Command.create({
+      commandId,
+      nodeId: node.nodeId,
+      command: 'rotate_api_key',
+      params: {
+        newApiKey,
+        apiKeyVersion: node.apiKeyVersion + 1,
+      },
+      status: 'pending',
+      createdBy: req.admin.email,
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`node:${node.nodeId}`).emit('command:new', {
+        commandId,
+        command: 'rotate_api_key',
+        params: { apiKeyVersion: node.apiKeyVersion + 1 },
+      });
+    }
+
+    // Set a timeout to check if rotation was confirmed
+    setTimeout(async () => {
+      const updatedNode = await Node.findOne({ nodeId: node.nodeId });
+      if (updatedNode && updatedNode.apiKeyRotationStatus === 'pending') {
+        updatedNode.apiKeyRotationStatus = 'failed';
+        updatedNode.pendingApiKey = '';
+        await updatedNode.save();
+        logger.warn(`Key rotation failed for node ${node.name} — timeout`);
+        if (io) {
+          io.to('admin').emit('node:key-rotation', {
+            nodeId: node.nodeId,
+            status: 'failed',
+            message: 'Rotation timed out — node did not confirm',
+          });
+        }
+      }
+    }, 5 * 60 * 1000); // 5 minute grace period
+
+    await res.auditLog('api_key_rotation', 'node', node.nodeId, {
+      apiKeyVersion: node.apiKeyVersion + 1,
+      status: 'pending',
+    });
+
+    logger.info(`Key rotation initiated for node ${node.name} (v${node.apiKeyVersion} → v${node.apiKeyVersion + 1})`);
+
+    res.json({
+      success: true,
+      message: 'Key rotation initiated. Node must confirm within 5 minutes.',
+      newApiKey, // Shown once
+      apiKeyVersion: node.apiKeyVersion + 1,
+      commandId,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/nodes/key-rotation/confirm
+ * Node confirms API key rotation.
+ * Authenticated with the NEW API key.
+ */
+router.post('/key-rotation/confirm', authenticateNode, async (req, res, next) => {
+  try {
+    const node = await Node.findOne({ nodeId: req.node.nodeId });
+    if (!node) return res.status(404).json({ error: 'Node not found' });
+
+    if (node.apiKeyRotationStatus !== 'pending') {
+      return res.status(400).json({ error: 'No pending key rotation' });
+    }
+
+    // Promote pending key to active
+    node.apiKey = node.pendingApiKey;
+    node.pendingApiKey = '';
+    node.apiKeyVersion = (node.apiKeyVersion || 1) + 1;
+    node.apiKeyRotationStatus = 'confirmed';
+    node.apiKeyRotatedAt = new Date();
+    await node.save();
+
+    logger.info(`Key rotation confirmed for node ${node.name} (v${node.apiKeyVersion})`);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to('admin').emit('node:key-rotation', {
+        nodeId: node.nodeId,
+        name: node.name,
+        status: 'confirmed',
+        apiKeyVersion: node.apiKeyVersion,
+      });
+    }
+
+    res.json({ success: true, message: 'Key rotation confirmed', apiKeyVersion: node.apiKeyVersion });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
