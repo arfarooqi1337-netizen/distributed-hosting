@@ -310,7 +310,7 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
       updateFields.status = 'deploying';
       updateFields.progress = 75;
       if (message) updateFields.buildLog = message;
-    } else if (status === 'active') {
+    } else if (status === 'active' || status === 'success') {
       updateFields.status = 'active';
       updateFields.progress = 100;
       updateFields.completedAt = new Date();
@@ -342,7 +342,7 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
               containerId: containerId || nr.containerId,
               containerName: containerName || nr.containerName,
               port: port || nr.port,
-              completedAt: status === 'active' || status === 'failed' ? new Date() : nr.completedAt,
+              completedAt: status === 'active' || status === 'success' || status === 'failed' ? new Date() : nr.completedAt,
               error: status === 'failed' ? (message || 'Unknown error') : nr.error,
               progress: progress !== undefined ? progress : nr.progress,
             };
@@ -354,7 +354,7 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
     }
 
     // If deployment succeeded, update the website
-    if (status === 'active') {
+    if (status === 'active' || status === 'success') {
       const deployment = await Deployment.findOne({ deploymentId }).lean();
       if (deployment) {
         // Update node result in the deployment
@@ -385,7 +385,6 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
               deployedAt: new Date(),
               deployedBy: deployment.createdBy,
               healthStatus: 'unknown',
-              activeNode: deployment.assignedNode,
               'ports.internal': deployment.containerInfo?.internalPort || 8080,
               'ports.http': deployment.containerInfo?.exposedPort || port,
             },
