@@ -142,7 +142,7 @@ async function registerSite(deploymentOrOptions) {
 
     // Look up website to get the active node (may have changed after failover)
     const website = await Website.findOne({ siteId: deployment.siteId })
-      .populate('activeNode', 'nodeId name tailscaleIP ipAddress')
+      .populate('activeNode', 'nodeId name capabilities.tailscaleIp ipAddress')
       .lean();
 
     // Use activeNode if available, otherwise fall back to deployment's assignedNode
@@ -152,7 +152,7 @@ async function registerSite(deploymentOrOptions) {
     } else {
       const Node = require('../models/Node');
       targetNode = await Node.findOne({ nodeId: deployment.assignedNodeId })
-        .select('nodeId name tailscaleIP ipAddress')
+        .select('nodeId name capabilities.tailscaleIp ipAddress')
         .lean();
     }
 
@@ -164,12 +164,13 @@ async function registerSite(deploymentOrOptions) {
       return false;
     }
 
-    // Resolve the actual address — use tunnel endpoint if available, else localhost
+    // Resolve the actual address
     const nodeAddress = await tunnelService.getNodeAddress(
       targetNode.nodeId,
       port
     );
-    const targetAddress = nodeAddress || (targetNode.tailscaleIP ? `${targetNode.tailscaleIP}:${port}` : `localhost:${port}`);
+    const tailscaleIp = targetNode.capabilities?.tailscaleIp;
+    const targetAddress = nodeAddress || (tailscaleIp ? `${tailscaleIp}:${port}` : `localhost:${port}`);
 
     routingTable.set(deployment.domain, {
       deploymentId: deployment.deploymentId,

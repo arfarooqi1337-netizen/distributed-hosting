@@ -377,6 +377,13 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
           { $set: { nodeResults } }
         );
 
+        // Set activeNode to the node that actually reported success (not the assigned node)
+        let activeNodeId = null;
+        if (reportingNodeId) {
+          const reportingNode = await require('../models/Node').findOne({ nodeId: reportingNodeId }).select('_id').lean();
+          if (reportingNode) activeNodeId = reportingNode._id;
+        }
+
         await Website.updateOne(
           { siteId: deployment.siteId },
           {
@@ -385,6 +392,7 @@ async function handleDeploymentReport(deploymentId, report, reportingNodeId) {
               deployedAt: new Date(),
               deployedBy: deployment.createdBy,
               healthStatus: 'unknown',
+              activeNode: activeNodeId,
               'ports.internal': deployment.containerInfo?.internalPort || 8080,
               'ports.http': deployment.containerInfo?.exposedPort || port,
             },
