@@ -457,7 +457,7 @@ async function startCaddy() {
   }
 
   try {
-    caddyProcess = spawn(CADDY_BIN, ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile', '--data-dir', CADDY_DATA_DIR], {
+    caddyProcess = spawn(CADDY_BIN, ['run', '--config', CADDYFILE_PATH, '--adapter', 'caddyfile', '--datadir', CADDY_DATA_DIR], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
